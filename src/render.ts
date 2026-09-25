@@ -92,6 +92,7 @@ function display(
 	expanded: boolean,
 	previewRows = PREVIEW_ROWS,
 	styleHint: (text: string) => string = (text) => text,
+	preview: "head" | "tail" = "head",
 ): { render: (width: number) => string[]; invalidate: () => void } {
 	return {
 		render(width) {
@@ -110,20 +111,36 @@ function display(
 			};
 			for (const line of header) rows.push(...wrap(line));
 			let visibleLines = 0;
-			let usedRows = 0;
-			for (const line of body) {
-				const wrapped = wrap(line);
-				const count = expanded ? wrapped.length : Math.min(wrapped.length, previewRows - usedRows);
-				if (count <= 0) break;
-				rows.push(...wrapped.slice(0, count));
-				usedRows += count;
-				if (count < wrapped.length) break; // A partially visible source line is hidden.
-				visibleLines++;
+			let previewBody: string[] = [];
+			if (expanded) {
+				for (const line of body) previewBody.push(...wrap(line));
+			} else if (preview === "tail") {
+				let remaining = previewRows;
+				for (let i = body.length - 1; i >= 0 && remaining > 0; i--) {
+					const wrapped = wrap(body[i]);
+					const count = Math.min(wrapped.length, remaining);
+					previewBody = [...wrapped.slice(-count), ...previewBody];
+					remaining -= count;
+					if (count === wrapped.length) visibleLines++;
+				}
+			} else {
+				let remaining = previewRows;
+				for (const line of body) {
+					if (remaining <= 0) break;
+					const wrapped = wrap(line);
+					const count = Math.min(wrapped.length, remaining);
+					previewBody.push(...wrapped.slice(0, count));
+					remaining -= count;
+					if (count === wrapped.length) visibleLines++;
+				}
 			}
 			if (!expanded && body.length > visibleLines) {
 				const hidden = body.length - visibleLines;
-				rows.push(...wrap(styleHint(`... (${hidden} more ${hidden === 1 ? "line" : "lines"} • ${expandHint()})`)));
+				const hint = wrap(styleHint(`... (${hidden} more ${hidden === 1 ? "line" : "lines"} • ${expandHint()})`));
+				if (preview === "tail") rows.push(...hint);
+				else previewBody.push(...hint);
 			}
+			rows.push(...previewBody);
 			for (const footer of footers) rows.push(...wrap(footer));
 			return rows;
 		},
@@ -189,6 +206,8 @@ interface ResultDetails {
 	cancelled?: boolean;
 	timedOut?: boolean;
 	truncated?: boolean;
+	displayOutput?: string;
+	displayTruncated?: boolean;
 }
 
 function outcomeBody(text: string, details: ResultDetails | undefined, isError: boolean) {
@@ -225,15 +244,15 @@ export function renderResult(
 	if (options.isPartial) {
 		const details = result.details && typeof result.details === "object" ? result.details as ResultDetails & { streaming?: boolean } : undefined;
 		const text = details?.streaming === true
-			? result.content.filter((item) => item.type === "text" && typeof item.text === "string")
+			? details.displayOutput ?? result.content.filter((item) => item.type === "text" && typeof item.text === "string")
 				.map((item) => item.text).join("\n")
 			: "";
-		const footers = details?.streaming && details.truncated
+		const footers = details?.streaming && (details.truncated || details.displayTruncated)
 			? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")]
 			: [];
 		return display([theme.fg("warning", "Running…"), ...(text ? [""] : [])],
 			text ? safeText(text).split("\n").map((line) => theme.fg("toolOutput", line)) : [],
-			footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint));
+			footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
 	}
 	const details = result.details && typeof result.details === "object" ? result.details as ResultDetails : undefined;
 	const text = result.content.filter((item) => item.type === "text" && typeof item.text === "string")
@@ -261,6 +280,7 @@ export function renderResult(
 	// diagnostic evidence even when its exact format supplies a status summary.
 	if (context.isError && !details && matched) header.push(theme.fg("muted", safeText(matched[0].trimEnd())));
 	if (cleanup) header.push(theme.fg("warning", CLEANUP_WARNING));
-	const footers = parsed.truncated ? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")] : [];
-	return display(body ? [...header, ""] : header, body ? safeText(body).split("\n").map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint));
+	const footers = parsed.truncated || details?.displayTruncated ? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")] : [];
+	if (details?.displayOutput !== undefined) body = details.displayOutput;
+	return display(body ? [...header, ""] : header, body ? safeText(body).split("\n").map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
 }

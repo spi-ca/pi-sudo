@@ -327,6 +327,7 @@ export default function sudoExtension(
 				if (!touched)
 					throw new Error("sudo locked; user must run /sudo unlock in TUI");
 				let result;
+				let lastDisplayOutput: string | undefined;
 				try {
 					onUpdate?.({
 						content: [{ type: "text", text: "Checking access and running command…" }],
@@ -337,24 +338,40 @@ export default function sudoExtension(
 						params.args,
 						params.cwd ?? ctx.cwd,
 						signal,
-						onUpdate ? ({ stdout, stderr, truncated }) => {
-							const bounded = boundedText([stdout, stdout && stderr ? "\n" : "", stderr]);
+						onUpdate ? ({ stdout, stderr, truncated, displayOutput, displayTruncated }) => {
+							lastDisplayOutput = displayOutput;
+							const output = displayOutput ?? [stdout, stderr].filter(Boolean).join("\n");
+							const bounded = boundedText([output]);
 							onUpdate({
 								content: [{ type: "text", text: bounded.text }],
-								details: { streaming: true, truncated: truncated || bounded.truncated },
+								details: { streaming: true, truncated: truncated || bounded.truncated, displayOutput, displayTruncated },
 							});
 						} : undefined,
 					);
 				} catch (error) {
 					if (cleanupFailed(error)) cacheWarning = true;
 					updateStatus();
-					throw new Error(boundedError(error));
+					// Spawn/transport failures have no Outcome or Pi details. Preserve
+					// the last streamed ordered tail after the error diagnostic.
+					const message = lastDisplayOutput
+						? `${String(error)}\n${lastDisplayOutput}`
+						: error;
+					throw new Error(boundedError(message));
 				}
 				if (result.cleanupWarning) cacheWarning = true;
 				updateStatus();
+				if (result.code !== 0 || result.cancelled || result.timedOut) {
+					// Pi drops details for thrown tools. Use the ordered tail in the
+					// bounded error text so completed error cards retain the last output.
+					const failure = result.displayOutput === undefined ? result : {
+						...result,
+						stdout: result.displayOutput,
+						stderr: "",
+						truncated: result.truncated || result.displayTruncated === true,
+					};
+					throw new Error(formatOutcome(failure).text);
+				}
 				const { text, truncated } = formatOutcome(result);
-				if (result.code !== 0 || result.cancelled || result.timedOut)
-					throw new Error(text);
 				return {
 					content: [{ type: "text", text }],
 					details: {
@@ -362,6 +379,8 @@ export default function sudoExtension(
 						cancelled: result.cancelled,
 						timedOut: result.timedOut,
 						truncated,
+						displayOutput: result.displayOutput,
+						displayTruncated: result.displayTruncated,
 					},
 				};
 			} finally {
