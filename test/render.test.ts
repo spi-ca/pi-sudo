@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
-import { renderCall, renderResult } from "../src/render.js";
+import { createToolHtmlRenderer } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/export-html/tool-renderer.js";
+import { createCallRenderer, renderCall, renderResult } from "../src/render.js";
 
 type ToolRenderContext = Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
 const styles: { color: string; text: string }[] = [];
@@ -132,6 +133,19 @@ test("state precedence, partial result, empty/unclassified content, and control 
 	expect(renderResult(frozen as never, { expanded: true, isPartial: false }, theme, context).render(80).join("\n")).toContain("two");
 });
 
+test("partial output previews safely, expands captured text and warns about truncation", () => {
+	const partial = result("row 1\n" + Array.from({ length: 12 }, (_, i) => `row ${i + 2}`).join("\n") + "\x1b[2J\u202e", { streaming: true, truncated: true });
+	const short = renderResult(partial, { expanded: false, isPartial: true }, theme, context).render(80).join("\n");
+	const full = renderResult(partial, { expanded: true, isPartial: true }, theme, context).render(80).join("\n");
+	expect(short).toContain("Running…\n\nrow 1");
+	expect(short).not.toContain("row 13");
+	expect(short).toContain("to expand");
+	expect(short).toContain("Output truncated during capture");
+	expect(full).toContain("row 13\\u001b[2J\\u202e");
+	expect(full).not.toContain("\x1b");
+	expect(renderResult(result("secret", undefined), { expanded: true, isPartial: true }, theme, context).render(80)).toEqual(["Running…"]);
+});
+
 test("call is limited by visual rows, not 240 characters, and explicit default cwd stays hidden", () => {
 	const argv = "x".repeat(300) + "TAIL";
 	const full = renderCall({ executable: "/bin/echo", args: [argv], cwd: context.cwd }, theme, context).render(1000).join("\n");
@@ -154,5 +168,56 @@ test("null exit headers distinguish timeout and cancellation without coercing to
 });
 
 test("short call title and argv share a row", () => {
-	expect(renderCall({ executable: "/usr/bin/id", args: [] }, theme, context).render(80)).toEqual(["sudo_exec /usr/bin/id"]);
+	expect(renderCall({ executable: "/usr/bin/id", args: [] }, theme, context).render(80)).toEqual(["# /usr/bin/id"]);
+});
+
+test("HTML export's historical partial call context cannot start a timer", () => {
+	const calls = createCallRenderer();
+	const interval = spyOn(globalThis, "setInterval");
+	try {
+		const exporter = createToolHtmlRenderer({
+			getToolDefinition: (name) => name === "sudo_exec" ? { renderCall: calls.renderCall } as never : undefined,
+			theme, cwd: "/tmp",
+		});
+		expect(exporter.renderCall("historical", "sudo_exec", { executable: "/usr/bin/id" })).toContain("/usr/bin/id");
+		expect(interval).not.toHaveBeenCalled();
+		// The exporter supplies executionStarted=true, isPartial=true and a noop invalidate.
+		expect(calls.renderCall({}, theme, { ...context, toolCallId: "historical", executionStarted: true, isPartial: true, invalidate: () => {} }).render(80)).toEqual(["# …"]);
+		expect(interval).not.toHaveBeenCalled();
+	} finally {
+		interval.mockRestore();
+		calls.stopAll();
+	}
+});
+
+test("live title animates; cancellation and shutdown cannot restart a partial timer", async () => {
+	const calls = createCallRenderer();
+	const args = { executable: "/usr/bin/id", args: ["x\n"] };
+	let ticks = 0;
+	const running = { ...context, toolCallId: "running", executionStarted: true, isPartial: true, invalidate: () => { ticks++; } } as ToolRenderContext;
+	try {
+		expect(calls.renderCall(args, theme, running).render(120)).toEqual(['# /usr/bin/id "x\\n"']);
+		calls.start("running");
+		const component = calls.renderCall(args, theme, running);
+		expect(component.render(120).join(" ")).toMatch(/^⠋ # \/usr\/bin\/id "x\\n" · 0s$/);
+		await Bun.sleep(1050);
+		expect(ticks).toBeGreaterThanOrEqual(1);
+		expect(component.render(120).join(" ")).toMatch(/ · 1s$/);
+		calls.stop("running");
+		expect(calls.renderCall(args, theme, { ...running, isPartial: false }).render(120)).toEqual(['# /usr/bin/id "x\\n"']);
+		const count = ticks;
+		await Bun.sleep(550);
+		expect(ticks).toBe(count);
+		calls.start("cancelled");
+		const cancelled = { ...running, toolCallId: "cancelled" } as ToolRenderContext;
+		calls.renderCall(args, theme, cancelled);
+		calls.stop("cancelled");
+		expect(calls.renderCall(args, theme, cancelled).render(120)).toEqual(['# /usr/bin/id "x\\n"']);
+		calls.start("shutdown");
+		calls.renderCall(args, theme, { ...running, toolCallId: "shutdown" });
+		calls.stopAll();
+		expect(calls.renderCall(args, theme, { ...running, toolCallId: "shutdown" }).render(120)).toEqual(['# /usr/bin/id "x\\n"']);
+	} finally {
+		calls.stopAll();
+	}
 });

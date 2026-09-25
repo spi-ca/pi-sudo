@@ -5,12 +5,12 @@ sequenceDiagram
     participant Access as SudoAccess
     participant Proc as runProcess
     participant OS as sudo / 정책
-    User->>Entry: /sudo unlock [1..15] [--askpass]
-    Entry->>Entry: waitForIdle, epoch 확인, confirm
+    User->>Entry: /sudo unlock [1..15]
+    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, waitForIdle, epoch 확인, 모드 명시 후 confirm
     opt 터미널 모드
         Entry->>Entry: TUI stop
     end
-    opt askpass 모드
+    opt SUDO_ASKPASS 설정 시 askpass 모드
         Entry->>Entry: 정규 도우미 재검사, TUI 유지
     end
     Entry->>Access: unlock(minutes, true)

@@ -229,6 +229,7 @@ export class SudoAccess {
 		args: string[],
 		cwd?: string,
 		signal?: AbortSignal,
+		onOutput?: Parameters<Runner>[0]["onOutput"],
 	): Promise<Outcome> {
 		validateExec(executable, args, cwd);
 		if (!this.remainingMs())
@@ -248,6 +249,7 @@ export class SudoAccess {
 					cwd,
 					timeoutMs: Math.min(EXEC_TIMEOUT_MS, remaining),
 					signal: ownSignal,
+					onOutput,
 				});
 				// Do not mutate runner-owned outcomes (a fake runner may reuse them).
 				const outcome = {

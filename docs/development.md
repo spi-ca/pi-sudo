@@ -24,7 +24,7 @@ bun run docs:check
 자신이 관리하는 폐기 가능한 실제 TTY와 허용된 sudo 정책에서만 수행하세요. 실행 전 [보안 경계](security.md)를 읽으세요. `/usr/bin/true`가 정책상 허용되어야 잠금 해제 시험이 성공합니다.
 
 1. `pi -e /absolute/path/to/pi-sudo/index.ts`에서 `/sudo status`를 확인하고 `/sudo unlock 1`을 실행합니다. 확인을 거절하면 잠김을 확인하고, 다시 시도해 실제 터미널에만 인증 입력이 표시되는지 확인합니다.
-2. 신뢰 가능한 root 소유 도우미가 이미 있는 경우에만 `SUDO_ASKPASS=/absolute/system/helper` 환경에서 `/sudo unlock 1 --askpass`의 GUI 승인/실패를 별도로 시험합니다. 일반 사용자 소유 스크립트로 우회하지 마세요. GUI 시험은 이 저장소의 자동 테스트에 포함되지 않습니다.
+2. 신뢰 가능한 root 소유 도우미가 이미 있는 경우에만 `SUDO_ASKPASS=/absolute/system/helper` 환경에서 `/sudo unlock 1`의 GUI 승인/실패를 별도로 시험합니다. 일반 사용자 소유 스크립트로 우회하지 마세요. GUI 시험은 이 저장소의 자동 테스트에 포함되지 않습니다.
 3. `sudo_exec`에 `{"executable":"/usr/bin/id","args":[]}`를 요청해 정상 실행 후 `/sudo lock` 및 후속 도구 거부를 확인합니다.
 4. 만료(1분), 실패한 명령, 세션 종료/재시작, 비-TTY 모드를 각각 점검합니다. 필요하면 OS sudo 캐시를 별도로 검사합니다. 후손 종료나 캐시 무효화가 항상 성공한다고 추론하지 마세요.
 

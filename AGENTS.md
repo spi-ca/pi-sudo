@@ -4,7 +4,7 @@ This public Git-hosted Pi extension (npm publishing disabled via `private: true`
 
 - `index.ts` owns host/TTY gating, confirmation, TUI restoration, pending-confirmation epochs and shutdown. `touched` is not authorization; `src/sudo.ts` owns the grant.
 - `src/sudo.ts` owns serialized authorization and execution, generation/revocation, deadlines, and fail-closed invalidation. Keep separate `sudo -k`, interactive `sudo -v`, and `sudo -n -- /usr/bin/true` probe. Invalidate logical access before awaiting cache cleanup.
-- `src/askpass.ts` validates canonical root-owned helpers and ancestors; `src/output.ts` bounds final model text. Askpass is explicit, TUI/TTY-only, and auth-child-only.
+- `src/askpass.ts` validates canonical root-owned helpers and ancestors; `src/output.ts` bounds final model text. Askpass is selected automatically only when SUDO_ASKPASS is present, explicitly disclosed in confirmation, TUI/TTY-only, revalidated before auth, and auth-child-only; invalid helpers never fall back to terminal auth.
 - `src/process.ts` owns direct, non-detached child lifecycle and bounded output. Do not claim descendants are guaranteed to terminate or that sudo cache is isolated from same-UID/TTY processes.
 - Keep `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` exact `0.87.1` development versions unless explicitly assigned to change them. Do not add sudoers/install/configuration side effects.
 

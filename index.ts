@@ -5,10 +5,10 @@ import type {
 	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { trustedAskpass } from "./src/askpass.js";
-import { boundedError, formatOutcome } from "./src/output.js";
+import { boundedError, boundedText, formatOutcome } from "./src/output.js";
 import { runProcess, sudoPath, type Runner } from "./src/process.js";
 import { SudoAccess, validMinutes, type Clock } from "./src/sudo.js";
-import { renderCall, renderResult } from "./src/render.js";
+import { createCallRenderer, renderResult } from "./src/render.js";
 
 function checkHost(): void {
 	if (process.platform !== "linux" && process.platform !== "darwin")
@@ -31,6 +31,7 @@ export default function sudoExtension(
 	statusTimer: Pick<Clock, "setTimeout" | "clearTimeout"> = globalThis,
 	accessClock?: Clock,
 ): void {
+	const callRenderer = createCallRenderer();
 	let ui: ExtensionUIContext | undefined;
 	let closed = false;
 	let cacheWarning = false;
@@ -154,7 +155,6 @@ export default function sudoExtension(
 					(parts.length < 3 ||
 						(parts[2] === "--askpass" && parts[1] !== "--askpass"))
 				) {
-					const askpass = parts.includes("--askpass");
 					const minutesArg = parts[1] === "--askpass" ? undefined : parts[1];
 					const minutes = minutesArg ? validMinutes(minutesArg) : 5;
 					if (ctx.mode !== "tui" || !hasTerminal()) {
@@ -163,9 +163,10 @@ export default function sudoExtension(
 						);
 					}
 					ensureHost();
-					const helper = askpass
-						? resolveAskpass(askpassEnvironment())
-						: undefined;
+					const selectedAskpass = askpassEnvironment();
+					if (parts.includes("--askpass") && selectedAskpass === undefined)
+						throw new Error("--askpass requires SUDO_ASKPASS");
+					const helper = selectedAskpass === undefined ? undefined : resolveAskpass(selectedAskpass);
 					if (pendingUnlock) throw new Error("Sudo unlock is already pending");
 					pendingUnlock = true;
 					const epoch = authorizationEpoch;
@@ -179,7 +180,7 @@ export default function sudoExtension(
 						const approved = await ctx.ui.confirm(
 							"Temporarily allow administrator commands?",
 							[
-								`Duration: up to ${minutes} minute(s). Mode: ${askpass ? `OS askpass (${helper})` : "terminal"}.`,
+								`Duration: up to ${minutes} minute(s). Mode: ${helper ? `OS askpass (${helper})` : "terminal"}.`,
 								"",
 								"• The model may run ANY command allowed by your sudo policy without per-command approval. Use sudo_exec, not ordinary bash.",
 								"• Untrusted project text can influence the model.",
@@ -198,9 +199,12 @@ export default function sudoExtension(
 							access.unlock(
 								minutes,
 								true,
-								askpass
+								helper
 									? () => {
-											const current = resolveAskpass(askpassEnvironment());
+											const selected = askpassEnvironment();
+											if (selected === undefined)
+												throw new Error("SUDO_ASKPASS helper changed after confirmation");
+											const current = resolveAskpass(selected);
 											if (current !== helper)
 												throw new Error(
 													"SUDO_ASKPASS helper changed after confirmation",
@@ -209,7 +213,7 @@ export default function sudoExtension(
 										}
 									: undefined,
 							);
-						if (askpass) {
+						if (helper) {
 							await authenticate();
 						} else {
 							const error = await ctx.ui.custom<unknown>(
@@ -266,7 +270,7 @@ export default function sudoExtension(
 					}
 				} else {
 					throw new Error(
-						"Usage: /sudo unlock [minutes] [--askpass] | /sudo lock | /sudo status",
+						"Usage: /sudo unlock [minutes] | /sudo lock | /sudo status",
 					);
 				}
 			} catch (error) {
@@ -279,7 +283,7 @@ export default function sudoExtension(
 
 	pi.registerTool({
 		name: "sudo_exec",
-		label: "Sudo Exec",
+		label: "#",
 		description:
 			"Execute one absolute executable with argv under an explicitly user-unlocked sudo window. Use sudo_exec, not ordinary bash: the grant and OS cache are separate. No shell, no password parameters. 60s timeout; nonzero result revokes access.",
 		parameters: Type.Object({
@@ -293,59 +297,77 @@ export default function sudoExtension(
 				Type.String({ description: "Absolute working directory" }),
 			),
 		}),
-		renderCall,
+		renderCall: callRenderer.renderCall,
 		renderResult,
 		async execute(_id, params, signal, onUpdate, ctx) {
-			if (!closed) ui = ctx.ui;
+			// Pi marks the TUI row started before invoking execute; its first update
+			// renders after admission, while export/print never admit a spinner.
+			if (!closed && ctx.mode === "tui" && !signal?.aborted) callRenderer.start(_id);
+			const onAbort = () => callRenderer.stop(_id);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) onAbort();
 			try {
-				ensureHost();
-			} catch (error) {
+				if (!closed) ui = ctx.ui;
 				try {
-					await access.lock();
-				} catch {
-					cacheWarning = true;
-					updateStatus();
-					throw new Error(
-						boundedError(
-							`sudo -k cleanup failed; credential cache may remain valid; original: ${String(error)}`,
-						),
-					);
+					ensureHost();
+				} catch (error) {
+					try {
+						await access.lock();
+					} catch {
+						cacheWarning = true;
+						updateStatus();
+						throw new Error(
+							boundedError(
+								`sudo -k cleanup failed; credential cache may remain valid; original: ${String(error)}`,
+							),
+						);
+					}
+					throw new Error(boundedError(error));
 				}
-				throw new Error(boundedError(error));
-			}
-			if (!touched)
-				throw new Error("sudo locked; user must run /sudo unlock in TUI");
-			let result;
-			try {
-				onUpdate?.({
-					content: [{ type: "text", text: "Checking access and running command…" }],
-					details: undefined,
-				});
-				result = await access.exec(
-					params.executable,
-					params.args,
-					params.cwd ?? ctx.cwd,
-					signal,
-				);
-			} catch (error) {
-				if (cleanupFailed(error)) cacheWarning = true;
+				if (!touched)
+					throw new Error("sudo locked; user must run /sudo unlock in TUI");
+				let result;
+				try {
+					onUpdate?.({
+						content: [{ type: "text", text: "Checking access and running command…" }],
+						details: undefined,
+					});
+					result = await access.exec(
+						params.executable,
+						params.args,
+						params.cwd ?? ctx.cwd,
+						signal,
+						onUpdate ? ({ stdout, stderr, truncated }) => {
+							const bounded = boundedText([stdout, stdout && stderr ? "\n" : "", stderr]);
+							onUpdate({
+								content: [{ type: "text", text: bounded.text }],
+								details: { streaming: true, truncated: truncated || bounded.truncated },
+							});
+						} : undefined,
+					);
+				} catch (error) {
+					if (cleanupFailed(error)) cacheWarning = true;
+					updateStatus();
+					throw new Error(boundedError(error));
+				}
+				if (result.cleanupWarning) cacheWarning = true;
 				updateStatus();
-				throw new Error(boundedError(error));
+				const { text, truncated } = formatOutcome(result);
+				if (result.code !== 0 || result.cancelled || result.timedOut)
+					throw new Error(text);
+				return {
+					content: [{ type: "text", text }],
+					details: {
+						code: result.code,
+						cancelled: result.cancelled,
+						timedOut: result.timedOut,
+						truncated,
+					},
+				};
+			} finally {
+				signal?.removeEventListener("abort", onAbort);
+				callRenderer.stop(_id);
 			}
-			if (result.cleanupWarning) cacheWarning = true;
-			updateStatus();
-			const { text, truncated } = formatOutcome(result);
-			if (result.code !== 0 || result.cancelled || result.timedOut)
-				throw new Error(text);
-			return {
-				content: [{ type: "text", text }],
-				details: {
-					code: result.code,
-					cancelled: result.cancelled,
-					timedOut: result.timedOut,
-					truncated,
-				},
-			};
 		},
 	});
 
@@ -354,6 +376,7 @@ export default function sudoExtension(
 	pi.on("session_shutdown", async (_event, ctx) => {
 		authorizationEpoch++;
 		closed = true;
+		callRenderer.stopAll();
 		ctx.ui.setStatus("pi-sudo", undefined);
 		stopRefresh();
 		ui = undefined;

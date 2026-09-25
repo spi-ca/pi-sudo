@@ -22,7 +22,7 @@ flowchart TB
     Entry --> Output["src/output.ts<br/>최종 UTF-8 출력 제한"]
     Access --> Process["src/process.ts<br/>spawn·신호·출력 한도"]
     Process --> Sudo["/usr/bin/sudo<br/>Pi의 직접 자식<br/>종료 감시 대상"]
-    Sudo -. "--askpass 선택 시 sudo -A -v" .-> HelperOS["OS askpass 도우미<br/>Pi가 직접 실행하지 않음"]
+    Sudo -. "SUDO_ASKPASS 설정 시 sudo -A -v" .-> HelperOS["OS askpass 도우미<br/>Pi가 직접 실행하지 않음"]
     Sudo --> Policy["OS sudo 정책·공유 timestamp"]
     Sudo --> Child["sudo가 실행하는 대상 명령<br/>후손 가능<br/>전체 종료 보장 없음"]
     Entry -. "상태 표시" .-> User
@@ -36,6 +36,7 @@ flowchart TB
 | --- | --- | --- |
 | `index.ts` | Pi `/sudo` 명령, `sudo_exec` 도구 및 `session_shutdown` 등록; TUI 확인·중지/복원, host/TTY 확인, status 표시 | sudo credential 보관, OS 캐시 격리 |
 | `src/askpass.ts` | 실경로 도우미와 상위 디렉터리 신뢰 검사 | GUI 실행·sudo 정책 |
+| `src/render.ts` | 도구 카드의 `#` 호출 제목·경과 시간·출력 미리보기; Pi가 제공하는 진행·성공·오류 배경 사용 | sudo 허가 판정·도구 이름 변경 |
 | `src/output.ts` | UTF-8 최종 모델 출력 제한 | 인증 출력 저장 |
 | `src/sudo.ts` | 입력 유효성 검사, 인증/시험/실행/철회 상태, 기한·동시성·실패 폐쇄 | TUI 소유, 자식 프로세스 생성 세부 사항 |
 | `src/process.ts` | `/usr/bin/sudo` 파일 검사, `spawn`·타임아웃·신호·제한된 출력 수집 | sudo 정책 결정, 후손 종료 보장 |
@@ -66,12 +67,12 @@ sequenceDiagram
     participant Access as SudoAccess
     participant Proc as runProcess
     participant OS as sudo / 정책
-    User->>Entry: /sudo unlock [1..15] [--askpass]
-    Entry->>Entry: waitForIdle, epoch 확인, confirm
+    User->>Entry: /sudo unlock [1..15]
+    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, waitForIdle, epoch 확인, 모드 명시 후 confirm
     opt 터미널 모드
         Entry->>Entry: TUI stop
     end
-    opt askpass 모드
+    opt SUDO_ASKPASS 설정 시 askpass 모드
         Entry->>Entry: 정규 도우미 재검사, TUI 유지
     end
     Entry->>Access: unlock(minutes, true)
@@ -102,7 +103,7 @@ sequenceDiagram
 
 `index.ts`의 `authorizationEpoch`는 대기 중인 `waitForIdle`/확인이 잠금 또는 종료 뒤 늦게 성공하는 일을 막습니다. `pendingUnlock`은 확인 UI 중복을 차단합니다. `touched`는 sudo 경로에 진입했는지 기록해 도구의 최초 사용과 shutdown 정리를 게이트할 뿐, **접근 허가 상태가 아닙니다**. 실제 허가는 `SudoAccess`의 기한 확인으로 판정합니다. `src/sudo.ts`의 `generation`은 비동기 인증 완료가 이미 철회된 접근을 다시 여는 일을 막고, `active`/`locking`은 실행과 잠금 작업이 경합하지 않게 합니다.
 
-기본 인증에는 실제 터미널을 상속시키고 askpass 선택 시에만 sudo 인증 자식에게 도우미 환경 변수를 전달하고 표준 입출력을 무시합니다. 도우미 검사는 확인 전과 인증 직전에 수행합니다. `src/output.ts`는 도구 결과의 헤더·정리 경고까지 포함해 UTF-8 크기와 줄 수를 제한합니다., 실행·시험·무효화에는 출력 크기가 제한된 파이프(표준 입력은 무시)를 사용합니다. 모두 같은 Pi 프로세스를 부모로 하는 non-detached 직접 자식이므로 같은 sudo timestamp 범위를 사용하는 구성을 시험할 수 있지만, sudoers 정책이나 OS 캐시 구성을 강제하지는 않습니다.
+`SUDO_ASKPASS`가 없으면 실제 터미널을 상속시키고, 설정되면 확인 화면에서 검증된 도우미를 알린 뒤 sudo 인증 자식에게만 환경 변수를 전달하고 표준 입출력을 무시합니다. 잘못된 설정이나 인증 실패는 터미널 방식으로 대체하지 않습니다. 도우미 검사는 확인 전과 인증 직전에 수행합니다. `src/output.ts`는 도구 결과의 헤더·정리 경고까지 포함해 UTF-8 크기와 줄 수를 제한합니다., 실행·시험·무효화에는 출력 크기가 제한된 파이프(표준 입력은 무시)를 사용합니다. 모두 같은 Pi 프로세스를 부모로 하는 non-detached 직접 자식이므로 같은 sudo timestamp 범위를 사용하는 구성을 시험할 수 있지만, sudoers 정책이나 OS 캐시 구성을 강제하지는 않습니다.
 
 ## 허가 수명
 
