@@ -412,18 +412,18 @@ function fakeClock() {
 	};
 }
 
-test("status starts locked, pending is not a grant, duplicate unlock cannot mask a grant", async () => {
+test("locked status stays hidden, pending is not a grant, duplicate unlock cannot mask a grant", async () => {
 	const clock = fakeClock();
 	let release!: (approved: boolean) => void;
 	const f = fixture({ clock: clock.scheduler, confirm: () => new Promise((resolve) => { release = resolve; }) });
 	f.startup();
-	expect(f.statuses.at(-1)).toEqual({ color: "dim", text: "🔒 sudo" });
+	expect(f.statuses.at(-1)).toEqual({ color: "clear", text: "" });
 	const pending = f.command("unlock 1");
 	await Promise.resolve();
 	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⏳ sudo" });
 	release(false);
 	await pending;
-	expect(f.statuses.at(-1)?.text).toBe("🔒 sudo");
+	expect(f.statuses.at(-1)?.text).toBe("");
 	const unlock = f.command("unlock 1");
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	release(true);
@@ -444,7 +444,7 @@ test("status starts locked, pending is not a grant, duplicate unlock cannot mask
 	expect(f.boldLabels.at(-1)).toBe("⚡ sudo 0:30");
 	expect(f.calls).toHaveLength(count);
 	await f.command("lock");
-	expect(f.statuses.at(-1)?.text).toBe("🔒 sudo");
+	expect(f.statuses.at(-1)?.text).toBe("");
 	expect(clock.count()).toBe(0);
 	await f.shutdown();
 	expect(f.statuses.at(-1)?.color).toBe("clear");
@@ -462,7 +462,7 @@ test("revocation and shutdown fence pending UI and leave no refresh", async () =
 		await (transition === "lock" ? f.command("lock") : f.shutdown());
 		release(true);
 		await unlock;
-		expect(f.statuses.at(-1)?.text).toBe(transition === "lock" ? "🔒 sudo" : "");
+		expect(f.statuses.at(-1)?.text).toBe("");
 		expect(clock.count()).toBe(0);
 	}
 });
@@ -481,7 +481,7 @@ test("cache cleanup warning persists through status until successful lock", asyn
 	await f.command("status");
 	expect(f.statuses.at(-1)?.text).toBe("⚠️ sudo");
 	await f.command("lock");
-	expect(f.statuses.at(-1)).toEqual({ color: "dim", text: "🔒 sudo" });
+	expect(f.statuses.at(-1)).toEqual({ color: "clear", text: "" });
 	await f.shutdown();
 });
 
