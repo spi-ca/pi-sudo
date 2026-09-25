@@ -7,7 +7,7 @@ import type {
 import { trustedAskpass } from "./src/askpass.js";
 import { boundedError, formatOutcome } from "./src/output.js";
 import { runProcess, sudoPath, type Runner } from "./src/process.js";
-import { SudoAccess, validMinutes } from "./src/sudo.js";
+import { SudoAccess, validMinutes, type Clock } from "./src/sudo.js";
 import { renderCall, renderResult } from "./src/render.js";
 
 function checkHost(): void {
@@ -28,40 +28,95 @@ export default function sudoExtension(
 	ensureHost = checkHost,
 	askpassEnvironment = () => process.env.SUDO_ASKPASS,
 	resolveAskpass = trustedAskpass,
+	statusTimer: Pick<Clock, "setTimeout" | "clearTimeout"> = globalThis,
+	accessClock?: Clock,
 ): void {
 	let ui: ExtensionUIContext | undefined;
+	let closed = false;
+	let cacheWarning = false;
+	let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+	const stopRefresh = () => {
+		if (refreshTimer) statusTimer.clearTimeout(refreshTimer);
+		refreshTimer = undefined;
+	};
+	const cleanupFailed = (error: unknown) =>
+		String(error).includes("sudo -k cleanup failed; credential cache may remain valid") ||
+		String(error).includes("sudo -k failed; credential cache may remain valid");
+	function updateStatus(): void {
+		stopRefresh();
+		if (closed || !ui) return;
+		// remainingMs may synchronously revoke an expired grant and call back here.
+		const remaining = access.remainingMs();
+		if (closed || !ui) return;
+		let label = "🔒 sudo";
+		let color: "dim" | "warning" | "error" = "dim";
+		if (remaining > 0) {
+			const seconds = Math.ceil(remaining / 1000);
+			label = `⚡ sudo ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+			color = "warning";
+			refreshTimer = statusTimer.setTimeout(updateStatus, Math.min(1000, remaining));
+			refreshTimer.unref?.();
+		} else if (cacheWarning) {
+			label = "⚠️ sudo";
+			color = "error";
+		} else if (pendingUnlock && pendingEpoch === authorizationEpoch) {
+			label = "⏳ sudo";
+			color = "warning";
+		}
+		const displayLabel = remaining > 0 && remaining <= 30_000 ? ui.theme.bold(label) : label;
+		ui.setStatus("pi-sudo", ui.theme.fg(color, displayLabel));
+	}
+	let pendingEpoch = -1;
 	// Cleanup ownership, not authorization: only SudoAccess can admit an execution.
 	let touched = false;
 	// Fence UI awaits before unlock starts; SudoAccess.generation fences the later auth awaits.
 	let authorizationEpoch = 0;
 	let pendingUnlock = false;
 	// Recheck the sudo binary for every child, including late cleanup after a host failure.
-	const checkedRun: Runner = (invocation) => {
-		ensureHost();
-		return run(invocation);
+	const checkedRun: Runner = async (invocation) => {
+		const invalidating = invocation.args[0] === "-k";
+		try {
+			ensureHost();
+			const result = await run(invocation);
+			if (invalidating) {
+				cacheWarning = result.code !== 0 || result.cancelled || result.timedOut || Boolean(result.terminationUnconfirmed);
+				updateStatus();
+			}
+			return result;
+		} catch (error) {
+			if (invalidating) {
+				cacheWarning = true;
+				updateStatus();
+			}
+			throw error;
+		}
 	};
 	const access = new SudoAccess(
 		checkedRun,
 		"/usr/bin/sudo",
-		undefined,
-		() => {
-			ui?.setStatus(
-				"pi-sudo",
-				access.remainingMs() > 0 ? "sudo unlocked" : undefined,
-			);
-		},
-		(error) =>
-			ui?.notify(
+		accessClock,
+		updateStatus,
+		(error) => {
+			cacheWarning = true;
+			updateStatus();
+			if (!closed) ui?.notify(
 				boundedError(`sudo expiry invalidation failed: ${String(error)}`),
 				"error",
-			),
+			);
+		},
 	);
+
+	pi.on("session_start", (_event, ctx) => {
+		closed = false;
+		ui = ctx.ui;
+		updateStatus();
+	});
 
 	pi.registerCommand("sudo", {
 		description:
 			"Explicit sudo unlock [1–15 minutes], lock, or status (interactive terminal only)",
 		handler: async (raw, ctx) => {
-			ui = ctx.ui;
+			if (!closed) ui = ctx.ui;
 			const parts = raw.trim().split(/\s+/);
 			try {
 				if (parts[0] === "status" && parts.length === 1) {
@@ -75,7 +130,15 @@ export default function sudoExtension(
 				} else if (parts[0] === "lock" && parts.length === 1) {
 					authorizationEpoch++;
 					touched = true;
-					await access.lock();
+					updateStatus();
+					try {
+						await access.lock();
+					} catch (error) {
+						cacheWarning = true;
+						throw error;
+					}
+					cacheWarning = false;
+					updateStatus();
 					touched = false;
 					ctx.ui.notify(
 						"sudo locked; current sudo timestamp invalidated",
@@ -102,6 +165,8 @@ export default function sudoExtension(
 					if (pendingUnlock) throw new Error("Sudo unlock is already pending");
 					pendingUnlock = true;
 					const epoch = authorizationEpoch;
+					pendingEpoch = epoch;
+					updateStatus();
 					try {
 						// Do not lend the terminal to sudo while the agent is still producing output.
 						await ctx.waitForIdle();
@@ -109,7 +174,16 @@ export default function sudoExtension(
 							throw new Error("Unlock was revoked");
 						const approved = await ctx.ui.confirm(
 							"Temporarily allow administrator commands?",
-							`Mode: ${askpass ? `OS askpass (${helper})` : "terminal"}. For up to ${minutes} minute(s), the model may run ANY command allowed by your sudo policy, without per-command approval. Untrusted project text can influence the model. Lock cannot undo changes or guarantee stopping root descendants. The sudo cache may be shared with this terminal. Continue?`,
+							[
+								`Duration: up to ${minutes} minute(s). Mode: ${askpass ? `OS askpass (${helper})` : "terminal"}.`,
+								"",
+								"• The model may run ANY command allowed by your sudo policy without per-command approval. Use sudo_exec, not ordinary bash.",
+								"• Untrusted project text can influence the model.",
+								"• Lock cannot undo changes or guarantee stopping root descendants.",
+								"• The sudo cache may be shared with this terminal.",
+								"",
+								"Continue?",
+							].join("\n"),
 						);
 						if (!approved) return;
 						if (epoch !== authorizationEpoch)
@@ -160,8 +234,8 @@ export default function sudoExtension(
 												// If TUI restoration fails, revoke access regardless of auth result.
 												try {
 													await access.lock();
-												} catch {
-													/* best effort; report restoration error */
+												} catch (cleanupError) {
+													failure = new Error(`${String(failure)}; sudo cache cleanup failed: ${String(cleanupError)}`);
 												}
 											} finally {
 												// Always settle the custom screen, including a failed terminal restore.
@@ -174,13 +248,17 @@ export default function sudoExtension(
 							);
 							if (error) throw error;
 						}
-						if (access.remainingMs() > 0)
+						if (access.remainingMs() > 0) {
+							cacheWarning = false;
+							updateStatus();
 							ctx.ui.notify(
-								"sudo unlocked: use sudo_exec, not ordinary bash; expiry and /sudo lock remain separate from OS cache (no automatic renewal)",
+								"sudo unlocked: use sudo_exec, not ordinary bash; no automatic renewal",
 								"info",
 							);
+						}
 					} finally {
 						pendingUnlock = false;
+						updateStatus();
 					}
 				} else {
 					throw new Error(
@@ -188,6 +266,8 @@ export default function sudoExtension(
 					);
 				}
 			} catch (error) {
+				if (cleanupFailed(error)) cacheWarning = true;
+				updateStatus();
 				ctx.ui.notify(boundedError(error), "error");
 			}
 		},
@@ -212,13 +292,15 @@ export default function sudoExtension(
 		renderCall,
 		renderResult,
 		async execute(_id, params, signal, onUpdate, ctx) {
-			ui = ctx.ui;
+			if (!closed) ui = ctx.ui;
 			try {
 				ensureHost();
 			} catch (error) {
 				try {
 					await access.lock();
 				} catch {
+					cacheWarning = true;
+					updateStatus();
 					throw new Error(
 						boundedError(
 							`sudo -k cleanup failed; credential cache may remain valid; original: ${String(error)}`,
@@ -242,8 +324,12 @@ export default function sudoExtension(
 					signal,
 				);
 			} catch (error) {
+				if (cleanupFailed(error)) cacheWarning = true;
+				updateStatus();
 				throw new Error(boundedError(error));
 			}
+			if (result.cleanupWarning) cacheWarning = true;
+			updateStatus();
 			const { text, truncated } = formatOutcome(result);
 			if (result.code !== 0 || result.cancelled || result.timedOut)
 				throw new Error(text);
@@ -263,11 +349,15 @@ export default function sudoExtension(
 	// No grant is persisted or carried into a replacement extension runtime.
 	pi.on("session_shutdown", async (_event, ctx) => {
 		authorizationEpoch++;
-		ui = ctx.ui;
+		closed = true;
+		ctx.ui.setStatus("pi-sudo", undefined);
+		stopRefresh();
+		ui = undefined;
 		if (touched) {
 			try {
 				await access.lock();
 			} catch (error) {
+				cacheWarning = true;
 				ctx.ui.notify(
 					boundedError(`sudo lock failed: ${String(error)}`),
 					"error",

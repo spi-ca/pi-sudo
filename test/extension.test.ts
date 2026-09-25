@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
 import type { Invocation, Outcome, Runner } from "../src/process.js";
+import type { Clock } from "../src/sudo.js";
 
 const ok: Outcome = {
 	code: 0,
@@ -25,12 +26,17 @@ function fixture(
 		host?: () => void;
 		askpass?: () => string | undefined;
 		resolveAskpass?: (value: string | undefined) => string;
+		clock?: Clock;
 	} = {},
 ) {
 	const calls: Invocation[] = [];
 	const events: string[] = [];
 	const messages: string[] = [];
+	const warnings: string[] = [];
+	const statuses: { color: string; text: string }[] = [];
+	const boldLabels: string[] = [];
 	let command!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+	let startup!: (event: { type: "session_start" }, ctx: ExtensionContext) => void;
 	let shutdown!: (
 		event: { type: "session_shutdown" },
 		ctx: ExtensionContext,
@@ -45,6 +51,7 @@ function fixture(
 		},
 		on: (name: string, handler: typeof shutdown) => {
 			if (name === "session_shutdown") shutdown = handler;
+			if (name === "session_start") startup = handler as unknown as typeof startup;
 			return () => {};
 		},
 	} as unknown as ExtensionAPI;
@@ -59,6 +66,8 @@ function fixture(
 		options.host ?? (() => {}),
 		options.askpass ?? (() => undefined),
 		options.resolveAskpass ?? (() => "/trusted/helper"),
+		options.clock,
+		options.clock,
 	);
 	const ctx = {
 		mode: options.mode ?? "tui",
@@ -67,8 +76,22 @@ function fixture(
 			events.push("idle");
 		},
 		ui: {
+			theme: {
+				fg: (color: string, text: string) => JSON.stringify({ color, text }),
+				bold: (text: string) => { boldLabels.push(text); return text; },
+			},
 			confirm: async (_title: string, warning: string) => {
-				expect(warning).toContain("ANY command");
+				warnings.push(warning);
+				expect(warning).toMatch(/^Duration: up to \d+ minute\(s\)\. Mode: (terminal|OS askpass \([^\n]+\))\.\n\n/);
+				for (const sentence of [
+					"ANY command allowed by your sudo policy without per-command approval",
+					"Use sudo_exec, not ordinary bash",
+					"Untrusted project text can influence the model",
+					"Lock cannot undo changes or guarantee stopping root descendants",
+					"The sudo cache may be shared with this terminal",
+					"Continue?",
+				]) expect(warning).toContain(sentence);
+				expect(warning.match(/^• /gm)).toHaveLength(4);
 				if (warning.includes("OS askpass"))
 					expect(warning).toContain("/trusted/helper");
 				events.push("confirm");
@@ -77,7 +100,9 @@ function fixture(
 			notify: (message: string) => {
 				messages.push(message);
 			},
-			setStatus: () => {},
+			setStatus: (_key: string, text: string | undefined) => {
+				statuses.push(text === undefined ? { color: "clear", text: "" } : JSON.parse(text));
+			},
 			custom: async (factory: (...args: any[]) => unknown) => {
 				let resolve!: (value: unknown) => void;
 				const result = new Promise<unknown>((done) => {
@@ -104,6 +129,10 @@ function fixture(
 		calls,
 		events,
 		messages,
+		warnings,
+		statuses,
+		boldLabels,
+		startup: () => startup({ type: "session_start" }, ctx),
 		command: (args: string) => command(args, ctx),
 		exec: (signal?: AbortSignal) =>
 			tool.execute(
@@ -133,6 +162,7 @@ test("non-TUI and non-TTY unlock fail before any sudo; locked tools fail", async
 test("confirmation, TUI restore, current cwd, shutdown and idempotent cleanup", async () => {
 	const f = fixture();
 	await f.command("unlock 1");
+	expect(f.warnings[0]).toContain("Duration: up to 1 minute(s). Mode: terminal.");
 	expect(f.events).toEqual(["idle", "confirm", "stop", "start"]);
 	expect(f.calls.slice(0, 3).map((call) => call.args)).toEqual([
 		["-k"],
@@ -260,6 +290,7 @@ test("askpass gating, refusal, recheck, failure and lock during authentication",
 		confirm: async () => false,
 	});
 	await refused.command("unlock 2 --askpass");
+	expect(refused.warnings[0]).toContain("Duration: up to 2 minute(s). Mode: OS askpass (/trusted/helper).");
 	expect(refused.calls).toHaveLength(0);
 	let checks = 0;
 	const changed = fixture({
@@ -347,4 +378,194 @@ test("askpass failure and helper substitution never grant or fall back", async (
 	await swapped.command("unlock --askpass");
 	expect(swapped.calls.some((call) => call.args.includes("-A"))).toBe(false);
 	await expect(swapped.exec()).rejects.toThrow("locked");
+});
+
+function fakeClock() {
+	let time = 0;
+	let next = 0;
+	const timers = new Map<number, { at: number; callback: () => void }>();
+	const scheduler = {
+		now: () => time,
+		wallNow: () => time,
+		setTimeout: (callback: () => void, delay: number) => {
+			const id = ++next;
+			timers.set(id, { at: time + delay, callback });
+			return { unref() {}, id } as unknown as ReturnType<typeof setTimeout>;
+		},
+		clearTimeout: (timer: ReturnType<typeof setTimeout>) => { timers.delete((timer as unknown as { id: number }).id); },
+	};
+	return {
+		scheduler,
+		count: () => timers.size,
+		advance(ms: number) {
+			const end = time + ms;
+			for (;;) {
+				const due = [...timers].filter(([, timer]) => timer.at <= end)
+					.sort((a, b) => a[1].at - b[1].at)[0];
+				if (!due) break;
+				time = due[1].at;
+				timers.delete(due[0]);
+				due[1].callback();
+			}
+			time = end;
+		},
+	};
+}
+
+test("status starts locked, pending is not a grant, duplicate unlock cannot mask a grant", async () => {
+	const clock = fakeClock();
+	let release!: (approved: boolean) => void;
+	const f = fixture({ clock: clock.scheduler, confirm: () => new Promise((resolve) => { release = resolve; }) });
+	f.startup();
+	expect(f.statuses.at(-1)).toEqual({ color: "dim", text: "🔒 sudo" });
+	const pending = f.command("unlock 1");
+	await Promise.resolve();
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⏳ sudo" });
+	release(false);
+	await pending;
+	expect(f.statuses.at(-1)?.text).toBe("🔒 sudo");
+	const unlock = f.command("unlock 1");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	release(true);
+	await unlock;
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo 1:00" });
+	const count = f.calls.length;
+	const duplicate = f.command("unlock 1");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+	release(true);
+	await duplicate;
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+	expect(f.calls).toHaveLength(count);
+	clock.advance(29_000);
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 0:31");
+	clock.advance(1_000);
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo 0:30" });
+	expect(f.boldLabels.at(-1)).toBe("⚡ sudo 0:30");
+	expect(f.calls).toHaveLength(count);
+	await f.command("lock");
+	expect(f.statuses.at(-1)?.text).toBe("🔒 sudo");
+	expect(clock.count()).toBe(0);
+	await f.shutdown();
+	expect(f.statuses.at(-1)?.color).toBe("clear");
+});
+
+test("revocation and shutdown fence pending UI and leave no refresh", async () => {
+	for (const transition of ["lock", "shutdown"]) {
+		const clock = fakeClock();
+		let release!: (approved: boolean) => void;
+		const f = fixture({ clock: clock.scheduler, confirm: () => new Promise((resolve) => { release = resolve; }) });
+		f.startup();
+		const unlock = f.command("unlock");
+		await Promise.resolve();
+		expect(f.statuses.at(-1)?.text).toBe("⏳ sudo");
+		await (transition === "lock" ? f.command("lock") : f.shutdown());
+		release(true);
+		await unlock;
+		expect(f.statuses.at(-1)?.text).toBe(transition === "lock" ? "🔒 sudo" : "");
+		expect(clock.count()).toBe(0);
+	}
+});
+
+test("cache cleanup warning persists through status until successful lock", async () => {
+	const clock = fakeClock();
+	let invalidations = 0;
+	const f = fixture({ clock: clock.scheduler, run: async (call) => {
+		if (call.args[0] === "-k" && ++invalidations === 2) return { ...ok, code: 1 };
+		return call.args[2] === "/usr/bin/id" ? { ...ok, code: 2 } : ok;
+	} });
+	f.startup();
+	await f.command("unlock 1");
+	await expect(f.exec()).rejects.toThrow("cleanup failed");
+	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	await f.command("status");
+	expect(f.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	await f.command("lock");
+	expect(f.statuses.at(-1)).toEqual({ color: "dim", text: "🔒 sudo" });
+	await f.shutdown();
+});
+
+test("expiry stops lightning and failed expiry invalidation shows warning", async () => {
+	const clock = fakeClock();
+	let invalidations = 0;
+	const f = fixture({ clock: clock.scheduler, run: async (call) =>
+		call.args[0] === "-k" && ++invalidations === 2 ? { ...ok, code: 1 } : ok });
+	f.startup();
+	await f.command("unlock 1");
+	clock.advance(60_000);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	expect(f.statuses.some(({ text }) => text === "⚡ sudo 0:00")).toBe(false);
+	expect(clock.count()).toBe(0);
+	await f.shutdown();
+});
+
+test("failed unlock cleanup and lock/host invalidation expose cache warning, not success", async () => {
+	const failedAuth = fixture({ run: async (call) => {
+		if (call.args[0] === "-k") return call.interactive ? ok : { ...ok, code: 1 };
+		return ok;
+	} });
+	failedAuth.startup();
+	await failedAuth.command("unlock");
+	expect(failedAuth.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	await failedAuth.command("status");
+	expect(failedAuth.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	await failedAuth.shutdown();
+
+	let hostValid = true;
+	const host = fixture({ host: () => { if (!hostValid) throw Error("host unavailable"); } });
+	host.startup();
+	await host.command("unlock");
+	hostValid = false;
+	await host.command("lock");
+	expect(host.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	await host.shutdown();
+});
+
+test("thrown execution cleanup error shows warning and no lingering grant", async () => {
+	let invalidations = 0;
+	const f = fixture({ run: async (call) => {
+		if (call.args[0] === "-k") return ++invalidations === 2 ? { ...ok, code: 1 } : ok;
+		if (call.args[2] === "/usr/bin/id") throw Error("spawn failure");
+		return ok;
+	} });
+	f.startup();
+	await f.command("unlock");
+	await expect(f.exec()).rejects.toThrow("cleanup failed");
+	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	await f.shutdown();
+});
+
+test("initial invalidation spawn failure and restoration cleanup failure warn", async () => {
+	const initial = fixture({ run: async () => { throw Error("spawn failure"); } });
+	initial.startup();
+	await initial.command("unlock");
+	expect(initial.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	await initial.shutdown();
+	let invalidations = 0;
+	const restore = fixture({ restoreFails: true, run: async (call) => {
+		if (call.args[0] === "-k" && ++invalidations === 2) throw Error("cleanup spawn failure");
+		return ok;
+	} });
+	restore.startup();
+	await restore.command("unlock");
+	expect(restore.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	expect(restore.messages.at(-1)).toContain("cleanup spawn failure");
+	await restore.shutdown();
+});
+
+test("shutdown clears lightning before waiting for cleanup", async () => {
+	let release!: () => void;
+	let invalidations = 0;
+	const f = fixture({ run: async (call) => {
+		if (call.args[0] === "-k" && ++invalidations === 2) await new Promise<void>(resolve => { release = resolve; });
+		return ok;
+	} });
+	f.startup();
+	await f.command("unlock");
+	const closing = f.shutdown();
+	expect(f.statuses.at(-1)?.color).toBe("clear");
+	release();
+	await closing;
+	expect(f.statuses.at(-1)?.color).toBe("clear");
 });
