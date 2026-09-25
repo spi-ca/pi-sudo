@@ -13,6 +13,12 @@ bun run docs:check
 
 별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 확인 UI·복원·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 기한·동시성·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
 
+## GitHub Actions CI
+
+[CI 워크플로](../.github/workflows/ci.yml)는 PR, `main` push, `v*` 태그 push 및 수동 실행을 지원합니다. Ubuntu에서 Bun `1.4.2`와 frozen lockfile을 사용해 타입 검사·전체 테스트·다이어그램 Markdown 동기화를 확인하고, 추적 파일 변경이 없는지 검사합니다. Actions는 커밋 SHA로 고정하며 토큰은 `contents: read`, 체크아웃 인증 정보는 유지하지 않습니다. 의존성 설치 스크립트도 실행하지 않습니다.
+
+실제 sudo 인증·GUI askpass·macOS 인증 및 Podman 이미지 재렌더링은 CI 범위가 아닙니다. 다이어그램 검사는 `.mmd`와 Markdown의 일치만 확인합니다. CI 성공을 실제 관리자 인증이나 이미지 최신성 검증으로 해석하지 마세요.
+
 ## 수동 승인 점검
 
 자신이 관리하는 폐기 가능한 실제 TTY와 허용된 sudo 정책에서만 수행하세요. 실행 전 [보안 경계](security.md)를 읽으세요. `/usr/bin/true`가 정책상 허용되어야 잠금 해제 시험이 성공합니다.
