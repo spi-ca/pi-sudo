@@ -145,14 +145,14 @@ function outcomeBody(text: string, details: ResultDetails | undefined, isError: 
 
 function resultStatus(isError: boolean, cancelled: boolean, timedOut: boolean, code: number | null | undefined): string {
 	if (isError) {
-		if (cancelled) return "오류 · 취소";
-		if (timedOut) return "오류 · 시간 초과";
-		return code == null ? "오류" : `오류 · exit=${code}`;
+		if (cancelled) return "Error · Cancelled";
+		if (timedOut) return "Error · Timed out";
+		return code == null ? "Error" : `Error · exit=${code}`;
 	}
-	if (cancelled) return "취소";
-	if (timedOut) return "시간 초과";
-	if (code == null) return "결과 (상태 미확인)";
-	return code === 0 ? "완료 · exit=0" : `실패 · exit=${code}`;
+	if (cancelled) return "Cancelled";
+	if (timedOut) return "Timed out";
+	if (code == null) return "Result (status unknown)";
+	return code === 0 ? "Completed · exit=0" : `Failed · exit=${code}`;
 }
 
 export function renderResult(
@@ -161,7 +161,7 @@ export function renderResult(
 	theme: Theme,
 	context: ToolRenderContext,
 ) {
-	if (options.isPartial) return display([theme.fg("warning", "실행 중…")], [], [], true);
+	if (options.isPartial) return display([theme.fg("warning", "Running…")], [], [], true);
 	const details = result.details && typeof result.details === "object" ? result.details as ResultDetails : undefined;
 	const text = result.content.filter((item) => item.type === "text" && typeof item.text === "string")
 		.map((item) => item.text).join("\n");
@@ -188,6 +188,6 @@ export function renderResult(
 	// diagnostic evidence even when its exact format supplies a status summary.
 	if (context.isError && !details && matched) header.push(theme.fg("muted", safeText(matched[0].trimEnd())));
 	if (cleanup) header.push(theme.fg("warning", CLEANUP_WARNING));
-	const footers = parsed.truncated ? [theme.fg("warning", "[출력 수집 중 잘림 · 펼쳐도 복구되지 않음]")] : [];
+	const footers = parsed.truncated ? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")] : [];
 	return display(body ? [...header, ""] : header, body ? safeText(body).split("\n").map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint));
 }

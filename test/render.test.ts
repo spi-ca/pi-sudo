@@ -92,7 +92,7 @@ test("resizing recomputes preview and narrow overwide glyphs never overflow", ()
 
 test("generated outcome header is removed only with evidence; errors and warnings remain", () => {
 	const header = "exit=0, cancelled=false, timedOut=false, truncated=false\n";
-	expect(show(header + "hello", { code: 0, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("완료 · exit=0\n\nhello");
+	expect(show(header + "hello", { code: 0, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("Completed · exit=0\n\nhello");
 	expect(show(header + "hello", null).join("\n")).toContain(header.trim());
 	expect(show("prefix " + header + "hello", { code: 0 }).join("\n")).toContain(header.trim());
 	expect(show(header + "hello", { code: 1 }).join("\n")).toContain(header.trim());
@@ -102,31 +102,31 @@ test("generated outcome header is removed only with evidence; errors and warning
 	const collapsed = show(content, null, false, true).join("\n");
 	const expanded = show(content, null, true, true).join("\n");
 	for (const text of [collapsed, expanded]) {
-		expect(text).toContain("오류 · exit=7");
+		expect(text).toContain("Error · exit=7");
 		expect(text).toContain(warning);
-		expect(text).toContain("[출력 수집 중 잘림 · 펼쳐도 복구되지 않음]");
+		expect(text).toContain("[Output truncated during capture · expanding will not show missing output]");
 		expect(text).toContain(error.trim());
 	}
 	expect(collapsed).not.toContain("row 24");
 	expect(expanded).toContain("row 24");
 	expect(show("Error: unexpected", null, false, true).join("\n")).toContain("Error: unexpected");
 	expect(show("exit=2, cancelled=false, timedOut=false, truncated=false\nfailed", null, false, true).join("\n")).toContain("exit=2, cancelled=false, timedOut=false, truncated=false\n\nfailed");
-	expect(show("exit=0, cancelled=true, timedOut=false, truncated=false\ncancelled", null, false, true).join("\n")).toContain("오류 · 취소");
-	expect(show("exit=0, cancelled=false, timedOut=true, truncated=false\ntimed out", null, false, true).join("\n")).toContain("오류 · 시간 초과");
+	expect(show("exit=0, cancelled=true, timedOut=false, truncated=false\ncancelled", null, false, true).join("\n")).toContain("Error · Cancelled");
+	expect(show("exit=0, cancelled=false, timedOut=true, truncated=false\ntimed out", null, false, true).join("\n")).toContain("Error · Timed out");
 	expect(show("ordinary output\n" + warning, null).join("\n")).toContain(warning);
-	expect(show("retained", { truncated: true }).join("\n")).toContain("잘림");
+	expect(show("retained", { truncated: true }).join("\n")).toContain("truncated");
 });
 
 test("state precedence, partial result, empty/unclassified content, and control safety", () => {
 	for (const [details, label] of [
-		[{ code: 0, cancelled: true }, "취소"],
-		[{ code: 0, timedOut: true }, "시간 초과"],
-		[{ code: 2 }, "실패 · exit=2"],
-		[null, "결과 (상태 미확인)"],
+		[{ code: 0, cancelled: true }, "Cancelled"],
+		[{ code: 0, timedOut: true }, "Timed out"],
+		[{ code: 2 }, "Failed · exit=2"],
+		[null, "Result (status unknown)"],
 	] as const) expect(show("", details).join("\n")).toBe(label);
-	expect(show("", { code: 0 }, false, true).join("\n")).toBe("오류 · exit=0");
-	const running = renderResult(result("권한 확인 및 명령 실행 중…"), { expanded: false, isPartial: true }, theme, context).render(80).join("\n");
-	expect(running).toBe("실행 중…");
+	expect(show("", { code: 0 }, false, true).join("\n")).toBe("Error · exit=0");
+	const running = renderResult(result("Checking access and running command…"), { expanded: false, isPartial: true }, theme, context).render(80).join("\n");
+	expect(running).toBe("Running…");
 	expect(show("\x1b[2J\u202eTAIL", { code: 0 }, true).join("\n")).toContain("\\u001b[2J\\u202eTAIL");
 	const frozen = Object.freeze({ content: Object.freeze([Object.freeze({ type: "text", text: "one\ntwo" })]), details: Object.freeze({ code: 0 }) });
 	expect(renderResult(frozen as never, { expanded: true, isPartial: false }, theme, context).render(80).join("\n")).toContain("two");
@@ -146,11 +146,11 @@ test("call is limited by visual rows, not 240 characters, and explicit default c
 
 test("null exit headers distinguish timeout and cancellation without coercing to success", () => {
 	const timeout = "Error: exit=null, cancelled=false, timedOut=true, truncated=false\nslow";
-	expect(show(timeout, null, false, true).join("\n")).toContain("오류 · 시간 초과\nError: exit=null, cancelled=false, timedOut=true, truncated=false\n\nslow");
+	expect(show(timeout, null, false, true).join("\n")).toContain("Error · Timed out\nError: exit=null, cancelled=false, timedOut=true, truncated=false\n\nslow");
 	const cancel = "exit=null, cancelled=true, timedOut=false, truncated=false\ninterrupted";
-	expect(show(cancel, null, false, true).join("\n")).toContain("오류 · 취소\nexit=null, cancelled=true, timedOut=false, truncated=false\n\ninterrupted");
+	expect(show(cancel, null, false, true).join("\n")).toContain("Error · Cancelled\nexit=null, cancelled=true, timedOut=false, truncated=false\n\ninterrupted");
 	expect(show(cancel, { code: 0, cancelled: true, timedOut: false, truncated: false }).join("\n")).toContain("exit=null");
-	expect(show("exit=null, cancelled=false, timedOut=false, truncated=false\nunknown", { code: null, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("결과 (상태 미확인)\n\nunknown");
+	expect(show("exit=null, cancelled=false, timedOut=false, truncated=false\nunknown", { code: null, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("Result (status unknown)\n\nunknown");
 });
 
 test("short call title and argv share a row", () => {
