@@ -1,0 +1,28 @@
+# 사용 방법
+
+## 사전 조건
+
+`index.ts`는 `linux` 또는 `darwin`, 비-root Pi 프로세스, root 소유이면서 실행 가능하고 그룹/전체 쓰기가 금지된 `/usr/bin/sudo`를 확인합니다. 잠금 해제에는 `ctx.mode === "tui"`와 stdin/stdout/stderr 모두 실제 TTY가 필요합니다. 그 밖의 환경에서 `/sudo unlock`은 인증을 시작하지 않습니다. `status`는 현재 확장 상태를 조회합니다.
+
+## 사용자 명령
+
+| 명령 | 동작 |
+| --- | --- |
+| `/sudo unlock` | 에이전트 idle을 기다린 뒤 사용자 확인, 터미널 sudo 인증 및 실행 경로 검증; 기본 5분 |
+| `/sudo unlock 1` … `/sudo unlock 15` | 정수 분 단위의 고정된 유효 기간; 이미 열려 있으면 먼저 잠가야 함 |
+| `/sudo status` | 잠금 여부 또는 남은 시간(올림한 초) 표시 |
+| `/sudo lock` | 확장 접근을 먼저 철회하고 진행 중인 직접 자식 종료 시도 후 `sudo -k` 실행 |
+
+확인 거부 시 sudo를 호출하지 않습니다. `unlock`은 Pi TUI를 중지하고 `sudo -v`에 터미널 입출력을 직접 물려준 다음 `finally`에서 TUI를 재개합니다. 인증 성공만으로 끝나지 않고 별도 `sudo -n -- /usr/bin/true` 실행 시험까지 통과해야 권한을 엽니다. 인증·시험 단계가 실패하면 잠긴 상태로 남습니다.
+
+## 모델 도구
+
+`sudo_exec`의 입력 예:
+
+```json
+{"executable":"/usr/bin/id","args":["-u"],"cwd":"/tmp"}
+```
+
+`executable`은 끝이 `/`가 아닌 NUL 없는 절대 파일 경로, `args`는 NUL 없는 문자열 배열, 선택적 `cwd`는 NUL 없는 절대 경로여야 합니다. `cwd` 생략 시 도구 컨텍스트의 `ctx.cwd`를 사용합니다. 허용 명령 목록이나 인수의 의미 검사는 없습니다. 실행은 `sudo -n -- <executable> <args...>` 형태의 직접 `spawn`이며 쉘을 거치거나 비밀번호를 다시 묻지 않습니다. 모델이 정한 프로그램 자체가 다른 명령을 실행할 수 있습니다.
+
+성공 결과는 `exit`, `cancelled`, `timedOut`, `truncated`를 포함한 텍스트와 같은 상태의 `details`를 돌려줍니다. stdout·stderr도 텍스트로 연결됩니다. 0이 아닌 종료 코드, 취소 또는 시간 초과는 도구 오류이며 접근을 철회합니다. 호출이 진행 중이거나 잠금·인증 중일 때 다른 호출은 거부됩니다. 입력 검증 실패나 busy 거부처럼 실행 전에 차단된 요청은 기존 허가를 자동으로 철회하지 않습니다. 출력은 stdout·stderr 각각 32 KiB까지 보관하며 잘릴 수 있습니다. 자세한 취소·캐시 한계는 [보안 경계](security.md)를 참고하세요.

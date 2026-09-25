@@ -1,0 +1,20 @@
+stateDiagram-v2
+    [*] --> Locked
+    Locked --> Pending: /sudo unlock + 확인 시작
+    Pending --> Locked: 인증 전 확인 거절 / 사전 조건 거부
+    Pending --> Revoking: 인증·시험 실패 / lock / shutdown
+    Pending --> Granted: -k, -v, -n true 성공 + generation 일치
+    Granted --> Granted: sudo_exec 성공 / 기한 연장 없음
+    Granted --> Revoking: 만료 감지 / lock / shutdown / 실행 실패·취소
+    Revoking --> Locked: sudo -k 정리 완료 또는 실패
+    Pending --> Poisoned: 직접 자식 종료 확인 불가
+    Granted --> Poisoned: 직접 자식 종료 확인 불가
+    Revoking --> Poisoned: 직접 자식 종료 확인 불가
+    note right of Poisoned
+        같은 런타임에서 재인증 불가
+        남은 프로세스 점검 후 Pi 재시작
+    end note
+    note right of Revoking
+        논리적 철회가 비동기 캐시 정리보다 먼저 일어남
+        sudo -k 실패나 외부 캐시 재생성은 별개
+    end note

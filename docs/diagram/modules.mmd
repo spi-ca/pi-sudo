@@ -1,0 +1,9 @@
+flowchart TB
+    User["사용자 / 실제 TTY"] --> Entry["index.ts<br/>명령·도구·UI·epoch"]
+    Model["모델"] --> Entry
+    Entry --> Access["src/sudo.ts<br/>검증·허가·기한·철회"]
+    Access --> Process["src/process.ts<br/>spawn·신호·출력 한도"]
+    Process --> Sudo["/usr/bin/sudo<br/>Pi의 직접 자식<br/>종료 감시 대상"]
+    Sudo --> Policy["OS sudo 정책·공유 timestamp"]
+    Sudo --> Child["sudo가 실행하는 대상 명령<br/>후손 가능<br/>전체 종료 보장 없음"]
+    Entry -. "상태 표시" .-> User
