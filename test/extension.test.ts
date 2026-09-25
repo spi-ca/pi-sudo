@@ -205,6 +205,42 @@ test("only authorized execution forwards bounded partial output, without changin
 	await f.shutdown();
 });
 
+test("mixed pipes use ordered display metadata on success and bounded error text on failure", async () => {
+	let fail = false;
+	const f = fixture({ run: async (call) => {
+		if (call.args[2] !== "/usr/bin/id") return ok;
+		call.onOutput?.({ stdout: "stdout prefix", stderr: "stderr prefix", truncated: false,
+			displayOutput: "err-first\nout-last", displayTruncated: false });
+		return { ...ok, code: fail ? 3 : 0, stdout: "stdout prefix", stderr: "stderr prefix",
+			displayOutput: "err-first\nout-last", displayTruncated: false };
+	} });
+	await f.command("unlock");
+	const updates: unknown[] = [];
+	const success = await f.exec(undefined, (update) => updates.push(update));
+	expect(updates[1]).toMatchObject({ content: [{ text: "err-first\nout-last" }], details: { displayOutput: "err-first\nout-last" } });
+	expect(success).toMatchObject({ content: [{ text: "exit=0, cancelled=false, timedOut=false, truncated=false\nstdout prefix\nstderr prefix" }],
+		details: { displayOutput: "err-first\nout-last" } });
+	fail = true;
+	await expect(f.exec()).rejects.toThrow("exit=3, cancelled=false, timedOut=false, truncated=false\nerr-first\nout-last");
+	await expect(f.exec()).rejects.toThrow("locked");
+	await f.shutdown();
+});
+
+test("thrown transport error keeps the last ordered streamed tail without details", async () => {
+	const f = fixture({ run: async (call) => {
+		if (call.args[2] !== "/usr/bin/id") return ok;
+		call.onOutput?.({ stdout: "out", stderr: "err", truncated: false,
+			displayOutput: "err-before\nout-after", displayTruncated: false });
+		throw new Error("transport failed");
+	} });
+	await f.command("unlock");
+	const updates: unknown[] = [];
+	await expect(f.exec(undefined, (update) => updates.push(update))).rejects.toThrow("transport failed\nerr-before\nout-after");
+	expect(updates.at(-1)).toMatchObject({ details: { displayOutput: "err-before\nout-after" } });
+	await expect(f.exec()).rejects.toThrow("locked");
+	await f.shutdown();
+});
+
 test("declined confirmation invokes no sudo", async () => {
 	const f = fixture({ confirm: async () => false });
 	await f.command("unlock");

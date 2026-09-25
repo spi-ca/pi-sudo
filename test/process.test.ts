@@ -42,6 +42,90 @@ test("streams coalesced bounded snapshots before exit and stops updating after c
 	expect(updates).toHaveLength(count);
 });
 
+test("ordered display tail follows both pipes after prefix limits and stays bounded", async () => {
+	const updates: string[] = [];
+	const result = await runProcess({
+		executable: process.execPath,
+		args: ["-e", `process.stdout.write('OUT-START\\n' + 'x'.repeat(40000));
+			setTimeout(() => process.stderr.write('\\nERR-MIDDLE\\n' + 'y'.repeat(40000)), 350);
+			setTimeout(() => process.stdout.write('\\nOUT-LATE-😀\\n'), 700);
+			setTimeout(() => process.stderr.write('ERR-LAST-한글\\n'), 1050);
+			setTimeout(() => process.exit(0), 1350);`],
+		timeoutMs: 3000,
+		captureDisplay: true,
+		onOutput: (update) => {
+			updates.push(update.displayOutput ?? "");
+			expect(Buffer.byteLength(update.displayOutput ?? "")).toBeLessThanOrEqual(32768);
+		},
+	});
+	expect(result.stdout).toStartWith("OUT-START");
+	expect(result.stdout).not.toContain("OUT-LATE");
+	expect(result.stderr).not.toContain("ERR-LAST");
+	expect(updates.some((text) => text.includes("y".repeat(100)))).toBe(true);
+	expect(result.displayOutput).toContain("OUT-LATE-😀\nERR-LAST-한글\n");
+	expect(result.displayOutput).not.toContain("OUT-START");
+	expect(result.displayTruncated).toBe(true);
+	expect(updates.some((text) => text.includes("OUT-LATE-😀"))).toBe(true);
+	expect(updates.at(-1)).toContain("ERR-LAST-한글");
+	expect(updates.length).toBeLessThanOrEqual(5);
+});
+
+test("display tail marks truncation only when bytes are discarded, including replacement", async () => {
+	const exact = await runProcess({
+		executable: process.execPath,
+		args: ["-e", "process.stdout.write('a'.repeat(32768))"],
+		timeoutMs: 3000,
+		captureDisplay: true,
+	});
+	expect(exact.displayOutput).toBe("a".repeat(32768));
+	expect(exact.displayTruncated).toBe(false);
+	expect(exact.truncated).toBe(false);
+
+	const over = await runProcess({
+		executable: process.execPath,
+		args: ["-e", "process.stdout.write('b'.repeat(32769))"],
+		timeoutMs: 3000,
+		captureDisplay: true,
+	});
+	expect(over.displayOutput).toBe("b".repeat(32768));
+	expect(over.displayTruncated).toBe(true);
+
+	const replaced = await runProcess({
+		executable: process.execPath,
+		args: ["-e", "process.stderr.write('old'); setTimeout(() => process.stdout.write('c'.repeat(32768)), 50)"],
+		timeoutMs: 3000,
+		captureDisplay: true,
+	});
+	expect(replaced.displayOutput).toBe("c".repeat(32768));
+	expect(replaced.displayTruncated).toBe(true);
+
+	const alreadyTruncated = await runProcess({
+		executable: process.execPath,
+		args: ["-e", "process.stderr.write('b'.repeat(32769)); setTimeout(() => process.stdout.write('d'.repeat(32768)), 50)"],
+		timeoutMs: 3000,
+		captureDisplay: true,
+	});
+	expect(alreadyTruncated.displayOutput).toBe("d".repeat(32768));
+	expect(alreadyTruncated.displayTruncated).toBe(true);
+});
+
+test("split UTF-8 sequences and many lines retain complete tail text", async () => {
+	const result = await runProcess({
+		executable: process.execPath,
+		args: ["-e", `const b = Buffer.from('😀'); process.stdout.write(b.subarray(0, 2));
+			setTimeout(() => { process.stderr.write('ERR\\n'); process.stdout.write(b.subarray(2));
+			process.stdout.write('\\n' + 'line\\n'.repeat(9000) + 'LAST'); }, 30);`],
+		timeoutMs: 3000,
+		captureDisplay: true,
+	});
+	expect(result.displayOutput).toEndWith("LAST");
+	expect(result.displayOutput).not.toContain("�");
+	expect(result.displayOutput!.split("\n").length).toBeLessThanOrEqual(1901);
+	expect(result.displayTruncated).toBe(true);
+	// Decoders never stitch incomplete bytes from different streams together.
+	expect(result.stdout).toStartWith("😀");
+});
+
 test("pending updates are cleared on close, spawn error, abort and timeout", async () => {
 	let updates = 0;
 	const onOutput = () => { updates++; };
@@ -74,6 +158,7 @@ test("abort suppresses partial updates while a SIGTERM-resistant child is still 
 			setInterval(() => process.stdout.write('more'), 30);`],
 		timeoutMs: 3000,
 		signal: controller.signal,
+		captureDisplay: true,
 		onOutput: () => {
 			updates++;
 			if (controller.signal.aborted) updatesAfterAbort++;
@@ -89,6 +174,8 @@ test("abort suppresses partial updates while a SIGTERM-resistant child is still 
 	expect(updatesAfterAbort).toBe(0);
 	expect(result.cancelled).toBe(true);
 	expect(result.stdout).toContain("start");
+	expect(result.displayOutput).toContain("start");
+	expect(Buffer.byteLength(result.displayOutput ?? "")).toBeLessThanOrEqual(32768);
 });
 
 test("timeout suppresses partial updates before a SIGTERM-resistant child settles", async () => {
@@ -176,6 +263,7 @@ test("askpass environment and auth streams are confined to the auth child", asyn
 	});
 	expect(auth.stdout).toBe("");
 	expect(auth.stderr).toBe("");
+	expect(auth.displayOutput).toBeUndefined();
 	const other = await runProcess({
 		executable: process.execPath,
 		args: ["-e", script],

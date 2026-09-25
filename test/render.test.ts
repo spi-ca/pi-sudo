@@ -52,14 +52,42 @@ test("first eight visual rows and logical hidden counts, with one muted entire h
 	const twentySeven = Array.from({ length: 27 }, (_, i) => `row ${i + 1}`).join("\n");
 	const lines = show(twentySeven);
 	expect(lines).toHaveLength(11);
-	expect(lines.join("\n")).toContain("row 8");
-	expect(lines.join("\n")).not.toContain("row 9\n");
-	expect(lines.at(-1)).toBe("... (19 more lines • Ctrl+O to expand)");
+	expect(lines.join("\n")).toContain("row 27");
+	expect(lines.join("\n")).not.toContain("row 19\n");
+	expect(lines[2]).toBe("... (19 more lines • Ctrl+O to expand)");
 	expect(styles).toContainEqual({ color: "muted", text: "... (19 more lines • Ctrl+O to expand)" });
-	expect(show(Array.from({ length: 9 }, (_, i) => `row ${i}`).join("\n")).at(-1)).toBe("... (1 more line • Ctrl+O to expand)");
+	expect(show(Array.from({ length: 9 }, (_, i) => `row ${i}`).join("\n"))[2]).toBe("... (1 more line • Ctrl+O to expand)");
 	const wrapped = show("x".repeat(400) + "\nnext\nlast", undefined, false, false, 20);
-	expect(wrapped.slice(1, 9)).toHaveLength(8);
-	expect(wrapped.join("")).toContain("3 more lines"); // first source line is only partly visible
+	expect(wrapped.slice(-8)).toHaveLength(8);
+	expect(wrapped.join("")).toContain("1 more line"); // first source line is only partly visible
+	expect(wrapped.at(-1)).toBe("last");
+});
+
+test("tail preview counts partially hidden wrapped lines above the last rows; call stays head-first", () => {
+	const body = "EARLY-" + "x".repeat(240) + "\nmiddle\nEND";
+	const collapsed = show(body, undefined, false, false, 12);
+	const expanded = show(body, undefined, true, false, 12);
+	expect(collapsed.join("\n")).toContain("END");
+	expect(collapsed.join("\n")).not.toContain("EARLY-");
+	expect(collapsed.join("\n")).toMatch(/1 more\nline/);
+	expect(collapsed.indexOf("END")).toBeGreaterThan(collapsed.findIndex((row) => row.includes("more")));
+	expect(expanded.join("\n")).toContain("EARLY-");
+	const call = renderCall({ executable: "/bin/echo", args: ["A".repeat(240) + "END"] }, theme, context).render(12).join("\n");
+	expect(call).not.toContain("END");
+});
+
+test("ordered display metadata wins over model prefix on completion; thrown error tail stays ordered", () => {
+	const text = "exit=0, cancelled=false, timedOut=false, truncated=true\nstdout-prefix\nstderr-prefix";
+	const details = { code: 0, cancelled: false, timedOut: false, truncated: true,
+		displayOutput: "stderr-now\nstdout-late\nlast", displayTruncated: true };
+	expect(show(text, details).join("\n")).toContain("stderr-now\nstdout-late\nlast");
+	expect(show(text, details, true).join("\n")).not.toContain("stdout-prefix");
+	const error = "Error: exit=3, cancelled=false, timedOut=false, truncated=true\nstderr-now\nstdout-late";
+	expect(show(error, undefined, false, true).join("\n")).toContain("stderr-now\nstdout-late");
+	const partial = renderResult(result("model prefix", { streaming: true, displayOutput: "stderr-now\nstdout-late" }),
+		{ isPartial: true, expanded: false }, theme, context).render(80).join("\n");
+	expect(partial).toContain("stderr-now\nstdout-late");
+	expect(partial).not.toContain("model prefix");
 });
 
 test("uses the current app.tools.expand key and restyles the whole notice", () => {
@@ -68,7 +96,7 @@ test("uses the current app.tools.expand key and restyles the whole notice", () =
 	manager.getKeys = (binding) => binding === "app.tools.expand" ? ["ctrl+shift+p"] : original.call(manager, binding);
 	try {
 		styles.length = 0;
-		const hint = show(Array.from({ length: 9 }, (_, i) => `row ${i}`).join("\n")).at(-1);
+		const hint = show(Array.from({ length: 9 }, (_, i) => `row ${i}`).join("\n"))[2];
 		expect(hint).toBe("... (1 more line • Ctrl+Shift+P to expand)");
 		expect(styles).toContainEqual({ color: "muted", text: hint! });
 	} finally {
@@ -79,7 +107,7 @@ test("uses the current app.tools.expand key and restyles the whole notice", () =
 test("resizing recomputes preview and narrow overwide glyphs never overflow", () => {
 	const component = renderResult(result("한글😀".repeat(40) + " TAIL\nnext"), { expanded: false, isPartial: false }, theme, context);
 	const narrow = component.render(12);
-	expect(narrow.join("\n")).not.toContain("TAIL");
+	expect(narrow.join("\n")).toContain("TAIL");
 	const wide = component.render(300);
 	expect(wide.join("\n")).toContain("TAIL");
 	expect(wide.join("\n")).toContain("next");
@@ -88,7 +116,7 @@ test("resizing recomputes preview and narrow overwide glyphs never overflow", ()
 		const rows = component.render(width);
 		expect(rows.every((row) => visibleWidth(row) <= width)).toBe(true);
 	}
-	expect(component.render(1).join("")).toContain("?");
+	expect(show("😀", undefined, false, false, 1).join("")).toContain("?");
 });
 
 test("generated outcome header is removed only with evidence; errors and warnings remain", () => {
@@ -108,7 +136,7 @@ test("generated outcome header is removed only with evidence; errors and warning
 		expect(text).toContain("[Output truncated during capture · expanding will not show missing output]");
 		expect(text).toContain(error.trim());
 	}
-	expect(collapsed).not.toContain("row 24");
+	expect(collapsed).not.toContain("row 16\n");
 	expect(expanded).toContain("row 24");
 	expect(show("Error: unexpected", null, false, true).join("\n")).toContain("Error: unexpected");
 	expect(show("exit=2, cancelled=false, timedOut=false, truncated=false\nfailed", null, false, true).join("\n")).toContain("exit=2, cancelled=false, timedOut=false, truncated=false\n\nfailed");
@@ -137,8 +165,9 @@ test("partial output previews safely, expands captured text and warns about trun
 	const partial = result("row 1\n" + Array.from({ length: 12 }, (_, i) => `row ${i + 2}`).join("\n") + "\x1b[2J\u202e", { streaming: true, truncated: true });
 	const short = renderResult(partial, { expanded: false, isPartial: true }, theme, context).render(80).join("\n");
 	const full = renderResult(partial, { expanded: true, isPartial: true }, theme, context).render(80).join("\n");
-	expect(short).toContain("Running…\n\nrow 1");
-	expect(short).not.toContain("row 13");
+	expect(short).toContain("Running…\n\n... (5 more lines");
+	expect(short).toContain("row 13");
+	expect(short).not.toContain("row 5\n");
 	expect(short).toContain("to expand");
 	expect(short).toContain("Output truncated during capture");
 	expect(full).toContain("row 13\\u001b[2J\\u202e");

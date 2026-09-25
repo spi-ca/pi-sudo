@@ -250,6 +250,7 @@ export class SudoAccess {
 					timeoutMs: Math.min(EXEC_TIMEOUT_MS, remaining),
 					signal: ownSignal,
 					onOutput,
+					captureDisplay: true,
 				});
 				// Do not mutate runner-owned outcomes (a fake runner may reuse them).
 				const outcome = {
