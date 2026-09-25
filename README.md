@@ -22,9 +22,11 @@ pi install git:github.com/spi-ca/pi-sudo
 pi -e /absolute/path/to/pi-sudo/index.ts
 ```
 
-Linux/macOS의 일반 사용자, 실제 터미널 입출력, 적합한 `/usr/bin/sudo`가 필요합니다. 실제 sudo 인증을 이용한 Linux/macOS 수동 검증은 아직 수행하지 않았습니다.
+Linux/macOS의 일반 사용자, 실제 터미널 입출력, 적합한 `/usr/bin/sudo`가 필요합니다. 실제 sudo 인증과 GUI askpass 수동 검증은 아직 수행하지 않았습니다.
 
 1. `/sudo unlock`을 실행해 경고를 확인하고 **실제 터미널**에서 인증합니다. 기본 유효 기간은 5분이며 `/sudo unlock 1`부터 `/sudo unlock 15`까지 정수 분을 지정할 수 있습니다.
+선택적으로 `/sudo unlock --askpass` 또는 `/sudo unlock 1 --askpass`를 사용하면 명시적으로 설정한 `SUDO_ASKPASS`의 신뢰 가능한 시스템 도우미를 sudo가 호출합니다. 기본값은 여전히 터미널 인증입니다. 어느 모드든 권한을 사용하는 도구는 일반 `bash`가 아닌 `sudo_exec`입니다.
+
 2. 잠금 해제 중 모델은 예를 들어 `sudo_exec`에 `{"executable":"/usr/bin/id","args":["-u"]}`를 전달할 수 있습니다. `cwd`는 선택적 절대 경로입니다. 쉘 문자열이 아니라 실행 파일과 인수 배열을 전달합니다.
 3. `/sudo status`로 남은 시간을 보고 `/sudo lock`으로 즉시 확장 접근을 차단합니다. `sudo -k`에 의한 OS 캐시 무효화는 실패하거나 다른 프로세스에 의해 다시 채워질 수 있습니다.
 

@@ -67,3 +67,22 @@ test("pre-aborted invocation never starts a process", async () => {
 		}),
 	).rejects.toThrow("cancelled");
 });
+
+test("askpass environment and auth streams are confined to the auth child", async () => {
+	const script =
+		"process.stdout.write(process.env.SUDO_ASKPASS || 'absent'); process.stderr.write('PRIVATE-CANARY')";
+	const auth = await runProcess({
+		executable: process.execPath,
+		args: ["-e", script],
+		askpass: "/trusted/helper",
+		timeoutMs: 5000,
+	});
+	expect(auth.stdout).toBe("");
+	expect(auth.stderr).toBe("");
+	const other = await runProcess({
+		executable: process.execPath,
+		args: ["-e", script],
+		timeoutMs: 5000,
+	});
+	expect(other.stdout).toBe("absent");
+});

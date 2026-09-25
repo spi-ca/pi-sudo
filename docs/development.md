@@ -11,15 +11,16 @@ bun test
 bun run docs:check
 ```
 
-별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 확인 UI·복원·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 기한·동시성·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. 실제 비밀번호 입력, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
+별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 확인 UI·복원·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 기한·동시성·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
 
 ## 수동 승인 점검
 
 자신이 관리하는 폐기 가능한 실제 TTY와 허용된 sudo 정책에서만 수행하세요. 실행 전 [보안 경계](security.md)를 읽으세요. `/usr/bin/true`가 정책상 허용되어야 잠금 해제 시험이 성공합니다.
 
 1. `pi -e /absolute/path/to/pi-sudo/index.ts`에서 `/sudo status`를 확인하고 `/sudo unlock 1`을 실행합니다. 확인을 거절하면 잠김을 확인하고, 다시 시도해 실제 터미널에만 인증 입력이 표시되는지 확인합니다.
-2. `sudo_exec`에 `{"executable":"/usr/bin/id","args":[]}`를 요청해 정상 실행 후 `/sudo lock` 및 후속 도구 거부를 확인합니다.
-3. 만료(1분), 실패한 명령, 세션 종료/재시작, 비-TTY 모드를 각각 점검합니다. 필요하면 OS sudo 캐시를 별도로 검사합니다. 후손 종료나 캐시 무효화가 항상 성공한다고 추론하지 마세요.
+2. 신뢰 가능한 root 소유 도우미가 이미 있는 경우에만 `SUDO_ASKPASS=/absolute/system/helper` 환경에서 `/sudo unlock 1 --askpass`의 GUI 승인/실패를 별도로 시험합니다. 일반 사용자 소유 스크립트로 우회하지 마세요. GUI 시험은 이 저장소의 자동 테스트에 포함되지 않습니다.
+3. `sudo_exec`에 `{"executable":"/usr/bin/id","args":[]}`를 요청해 정상 실행 후 `/sudo lock` 및 후속 도구 거부를 확인합니다.
+4. 만료(1분), 실패한 명령, 세션 종료/재시작, 비-TTY 모드를 각각 점검합니다. 필요하면 OS sudo 캐시를 별도로 검사합니다. 후손 종료나 캐시 무효화가 항상 성공한다고 추론하지 마세요.
 
 위 항목은 **수동 절차**이며 실제 수행 결과를 뜻하지 않습니다.
 
@@ -29,6 +30,8 @@ bun run docs:check
 index.ts                    Pi 명령·도구·사용자 확인과 TUI 어댑터
 src/sudo.ts                 접근 허가와 철회, 기한·동시성 정책
 src/process.ts              직접 자식 생성·출력·종료 감시
+src/askpass.ts              시스템 도우미 정규화·신뢰 검사
+src/output.ts               최종 모델 텍스트 크기·줄 제한
 test/                       런타임 세 모듈과 문서 동기화 테스트
 scripts/sync-diagrams.ts     Mermaid 정본 → Markdown 블록 동기화
 scripts/render-diagrams.ts   rootless Podman으로 SVG·2x PNG 생성

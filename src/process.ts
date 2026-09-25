@@ -8,6 +8,8 @@ export type Invocation = {
 	cwd?: string;
 	/** Authentication only: inherit real terminal FDs; never capture password input. */
 	interactive?: boolean;
+	/** Authentication only: sudo invokes this helper; Pi never invokes it directly. */
+	askpass?: string;
 	timeoutMs: number;
 	signal?: AbortSignal;
 };
@@ -20,6 +22,7 @@ export type Outcome = {
 	timedOut: boolean;
 	/** The watchdog settled without observing direct-child exit, not a descendant census. */
 	terminationUnconfirmed?: boolean;
+	cleanupWarning?: string;
 };
 export type Runner = (invocation: Invocation) => Promise<Outcome>;
 
@@ -49,11 +52,20 @@ export const runProcess: Runner = (invocation) =>
 		}
 		// Keep sudo's parent and controlling-terminal context consistent with authentication.
 		// A shell wrapper or detached session could select a different sudo timestamp record.
+		// Never leak ambient askpass into probe, execution or invalidation children.
+		const { SUDO_ASKPASS: _ambientAskpass, ...environment } = process.env;
 		const child = spawn(invocation.executable, invocation.args, {
+			env: invocation.askpass
+				? { ...environment, SUDO_ASKPASS: invocation.askpass }
+				: environment,
 			cwd: invocation.cwd,
 			shell: false,
 			detached: false,
-			stdio: invocation.interactive ? "inherit" : ["ignore", "pipe", "pipe"],
+			stdio: invocation.askpass
+				? "ignore"
+				: invocation.interactive
+					? "inherit"
+					: ["ignore", "pipe", "pipe"],
 		});
 		let stdout: Buffer = Buffer.alloc(0);
 		let stderr: Buffer = Buffer.alloc(0);

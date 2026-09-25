@@ -5,18 +5,23 @@ sequenceDiagram
     participant Access as SudoAccess
     participant Proc as runProcess
     participant OS as sudo / 정책
-    User->>Entry: /sudo unlock [1..15]
+    User->>Entry: /sudo unlock [1..15] [--askpass]
     Entry->>Entry: waitForIdle, epoch 확인, confirm
-    Entry->>Entry: TUI stop
+    opt 터미널 모드
+        Entry->>Entry: TUI stop
+    end
+    opt askpass 모드
+        Entry->>Entry: 정규 도우미 재검사, TUI 유지
+    end
     Entry->>Access: unlock(minutes, true)
     Access->>Proc: sudo -k (별도 호출)
     Proc->>OS: timestamp 무효화 시도
-    Access->>Proc: sudo -v (터미널 상속)
+    Access->>Proc: sudo -v (터미널 상속) 또는 sudo -A -v (askpass 환경·입출력 무시)
     Proc->>OS: 대화형 인증
     Access->>Proc: sudo -n -- /usr/bin/true
     Proc->>OS: 비대화형 실행 시험
     Access->>Access: generation 확인 후 기한 설정
-    Entry->>Entry: finally: TUI start
+    Entry->>Entry: 터미널 모드 finally: TUI start
     Entry-->>User: unlocked 또는 실패 알림
     Model->>Entry: sudo_exec (추가 사용자 승인 없음)
     Entry->>Access: exec(executable, args, cwd)
@@ -26,5 +31,5 @@ sequenceDiagram
     OS-->>Proc: 종료 코드 / 출력
     Proc-->>Access: Outcome
     Access-->>Entry: Outcome 또는 오류
-    Entry-->>Model: 도구 결과 또는 오류
+    Entry-->>Model: 48 KiB/2000줄 이내 결과 또는 오류
     Note over Access,OS: 인증·시험·실행 실패 시 논리적 철회 후 sudo -k 시도

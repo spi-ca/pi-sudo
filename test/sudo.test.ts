@@ -226,3 +226,64 @@ test("wall-clock suspend expires grant, clock rollback cannot extend monotonic d
 		expect(calls.some((call) => call.args[2] === "/usr/bin/id")).toBe(false);
 	}
 });
+
+test("late success after lock or external abort is cancelled and never succeeds", async () => {
+	for (const external of [false, true]) {
+		let release!: (value: Outcome) => void;
+		const calls: Invocation[] = [];
+		const access = new SudoAccess((call) => {
+			calls.push(call);
+			if (call.args[2] === "/usr/bin/id")
+				return new Promise((resolve) => {
+					release = resolve;
+				});
+			return Promise.resolve(ok);
+		}, "/usr/bin/sudo");
+		await access.unlock(1, true);
+		const abort = new AbortController();
+		const executing = access.exec("/usr/bin/id", [], undefined, abort.signal);
+		const locking = external ? undefined : access.lock();
+		if (external) abort.abort();
+		release(ok);
+		expect((await executing).cancelled).toBe(true);
+		await locking;
+		expect(access.remainingMs()).toBe(0);
+		expect(calls.at(-1)?.args).toEqual(["-k"]);
+	}
+});
+
+test("cleanup failure preserves original auth error and execution result without duplicate invalidation", async () => {
+	const a = fixture([ok, new Error("auth spawn failed"), fail]);
+	await expect(a.access.unlock(1, true)).rejects.toThrow(
+		/cleanup failed.*auth spawn failed/,
+	);
+	expect(a.calls).toHaveLength(3);
+	const b = fixture([fail]);
+	await expect(b.access.unlock(1, true)).rejects.toThrow("sudo -k failed");
+	expect(b.calls).toHaveLength(1);
+	const c = fixture([ok, ok, ok, { ...fail, stderr: "original" }, fail]);
+	await c.access.unlock(1, true);
+	const result = await c.access.exec("/usr/bin/id", []);
+	expect(result).toMatchObject({
+		code: 1,
+		stderr: "original",
+		cleanupWarning: expect.stringContaining("cleanup failed"),
+	});
+	expect(c.calls).toHaveLength(5);
+	expect(c.access.remainingMs()).toBe(0);
+});
+
+test("askpass auth-only invocation expires with no renewal", async () => {
+	const f = fixture();
+	await f.access.unlock(1, true, () => "/trusted/helper");
+	expect(f.calls[1]).toMatchObject({
+		args: ["-A", "-v"],
+		askpass: "/trusted/helper",
+		interactive: false,
+	});
+	expect(f.calls.filter((call) => call.askpass)).toHaveLength(1);
+	f.advance(60_001);
+	await tick();
+	await expect(f.access.exec("/usr/bin/id", [])).rejects.toThrow("locked");
+	expect(f.calls.at(-1)?.args).toEqual(["-k"]);
+});

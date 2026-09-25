@@ -143,7 +143,11 @@ export class SudoAccess {
 			throw new Error("sudo -k failed; credential cache may remain valid");
 	}
 
-	async unlock(minutes: number, interactive: boolean): Promise<void> {
+	async unlock(
+		minutes: number,
+		interactive: boolean,
+		askpass?: () => string,
+	): Promise<void> {
 		if (!interactive)
 			throw new Error(
 				"Unlock requires interactive Pi TUI and a real terminal on stdin/stdout/stderr",
@@ -155,13 +159,19 @@ export class SudoAccess {
 			throw new Error("Already unlocked; lock first (no automatic renewal)");
 		const generation = ++this.generation;
 		return this.start(async (signal) => {
+			let invalidated = false;
 			try {
-				await this.invalidate(); // Separate -k: combining -k with -v ignores and does not update the cache.
+				await this.invalidate();
+				// Combining -k with -v ignores and does not update the cache.
+				invalidated = true;
 				if (signal.aborted) throw new Error("Unlock cancelled");
+				// Resolve and recheck immediately before sudo's authentication child starts.
+				const helper = askpass?.();
 				const auth = await this.invoke({
 					executable: this.sudo,
-					args: ["-v"],
-					interactive: true,
+					args: helper ? ["-A", "-v"] : ["-v"],
+					interactive: !helper,
+					askpass: helper,
 					timeoutMs: AUTH_TIMEOUT_MS,
 					signal,
 				});
@@ -200,7 +210,15 @@ export class SudoAccess {
 				this.onChange();
 			} catch (error) {
 				this.clear();
-				await this.invalidate();
+				if (invalidated) {
+					try {
+						await this.invalidate();
+					} catch {
+						throw new Error(
+							`sudo -k cleanup failed; credential cache may remain valid; original: ${String(error)}`,
+						);
+					}
+				}
 				throw error;
 			}
 		});
@@ -231,22 +249,33 @@ export class SudoAccess {
 					timeoutMs: Math.min(EXEC_TIMEOUT_MS, remaining),
 					signal: ownSignal,
 				});
-				if (
-					result.code !== 0 ||
-					result.cancelled ||
-					result.timedOut ||
-					ownSignal.aborted
-				) {
+				// Do not mutate runner-owned outcomes (a fake runner may reuse them).
+				const outcome = {
+					...result,
+					cancelled: result.cancelled || ownSignal.aborted,
+				};
+				if (outcome.code !== 0 || outcome.cancelled || outcome.timedOut) {
 					// Cannot distinguish sudo denial from command failure: fail closed and revoke the cache.
 					this.clear();
 					revoked = true;
-					await this.invalidate();
+					try {
+						await this.invalidate();
+					} catch {
+						outcome.cleanupWarning =
+							"sudo -k cleanup failed; credential cache may remain valid";
+					}
 				}
-				return result;
+				return outcome;
 			} catch (error) {
 				if (!revoked) {
 					this.clear();
-					await this.invalidate();
+					try {
+						await this.invalidate();
+					} catch {
+						throw new Error(
+							`sudo -k cleanup failed; credential cache may remain valid; original: ${String(error)}`,
+						);
+					}
 				}
 				throw error;
 			} finally {
