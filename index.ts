@@ -318,7 +318,7 @@ export default function sudoExtension(
 			let result;
 			try {
 				onUpdate?.({
-					content: [{ type: "text", text: "권한 확인 및 명령 실행 중…" }],
+					content: [{ type: "text", text: "Checking access and running command…" }],
 					details: undefined,
 				});
 				result = await access.exec(

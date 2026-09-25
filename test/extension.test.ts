@@ -3,6 +3,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
+	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
 import type { Invocation, Outcome, Runner } from "../src/process.js";
@@ -134,12 +135,12 @@ function fixture(
 		boldLabels,
 		startup: () => startup({ type: "session_start" }, ctx),
 		command: (args: string) => command(args, ctx),
-		exec: (signal?: AbortSignal) =>
+		exec: (signal?: AbortSignal, onUpdate?: Parameters<ToolDefinition["execute"]>[3]) =>
 			tool.execute(
 				"id",
 				{ executable: "/usr/bin/id", args: [] },
 				signal,
-				undefined,
+				onUpdate,
 				ctx,
 			),
 		shutdown: () => shutdown({ type: "session_shutdown" }, ctx),
@@ -170,7 +171,9 @@ test("confirmation, TUI restore, current cwd, shutdown and idempotent cleanup", 
 		["-n", "--", "/usr/bin/true"],
 	]);
 	expect(f.messages.at(-1)).toContain("unlocked");
-	await f.exec();
+	const progress: unknown[] = [];
+	await f.exec(undefined, (update) => progress.push(update.content));
+	expect(progress).toEqual([[{ type: "text", text: "Checking access and running command…" }]]);
 	expect(f.calls.at(-1)?.cwd).toBe("/tmp");
 	await f.shutdown();
 	expect(f.calls.at(-1)?.args).toEqual(["-k"]);
