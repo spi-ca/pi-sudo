@@ -48,8 +48,8 @@ export default function sudoExtension(
 		// remainingMs may synchronously revoke an expired grant and call back here.
 		const remaining = access.remainingMs();
 		if (closed || !ui) return;
-		let label = "🔒 sudo";
-		let color: "dim" | "warning" | "error" = "dim";
+		let label: string | undefined;
+		let color: "warning" | "error" = "warning";
 		if (remaining > 0) {
 			const seconds = Math.ceil(remaining / 1000);
 			label = `⚡ sudo ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -62,6 +62,10 @@ export default function sudoExtension(
 		} else if (pendingUnlock && pendingEpoch === authorizationEpoch) {
 			label = "⏳ sudo";
 			color = "warning";
+		}
+		if (label === undefined) {
+			ui.setStatus("pi-sudo", undefined);
+			return;
 		}
 		const displayLabel = remaining > 0 && remaining <= 30_000 ? ui.theme.bold(label) : label;
 		ui.setStatus("pi-sudo", ui.theme.fg(color, displayLabel));
