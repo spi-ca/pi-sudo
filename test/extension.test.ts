@@ -9,6 +9,7 @@ import extension from "../index.js";
 import type { Invocation, Outcome, Runner } from "../src/process.js";
 import type { Clock } from "../src/sudo.js";
 
+
 const ok: Outcome = {
 	code: 0,
 	stdout: "",
@@ -42,7 +43,7 @@ function fixture(
 		event: { type: "session_shutdown" },
 		ctx: ExtensionContext,
 	) => Promise<void>;
-	let tool!: { execute: (...args: any[]) => Promise<unknown> };
+	let tool!: ToolDefinition;
 	const pi = {
 		registerCommand: (_name: string, options: { handler: typeof command }) => {
 			command = options.handler;
@@ -135,9 +136,10 @@ function fixture(
 		boldLabels,
 		startup: () => startup({ type: "session_start" }, ctx),
 		command: (args: string) => command(args, ctx),
-		exec: (signal?: AbortSignal, onUpdate?: Parameters<ToolDefinition["execute"]>[3]) =>
+		renderCall: tool.renderCall!,
+		exec: (signal?: AbortSignal, onUpdate?: Parameters<ToolDefinition["execute"]>[3], id = "id") =>
 			tool.execute(
-				"id",
+				id,
 				{ executable: "/usr/bin/id", args: [] },
 				signal,
 				onUpdate,
@@ -181,6 +183,26 @@ test("confirmation, TUI restore, current cwd, shutdown and idempotent cleanup", 
 	await f.shutdown();
 	expect(f.calls).toHaveLength(count);
 	await expect(f.exec()).rejects.toThrow("locked");
+});
+
+test("only authorized execution forwards bounded partial output, without changing final result", async () => {
+	const f = fixture({ run: async (call) => {
+		if (call.args[2] === "/usr/bin/id") {
+			call.onOutput?.({ stdout: "live", stderr: "\x1b[2J" + "x".repeat(80000), truncated: true });
+			return { ...ok, stdout: "live", stderr: "done" };
+		}
+		expect(call.onOutput).toBeUndefined();
+		return ok;
+	} });
+	await expect(f.exec()).rejects.toThrow("locked");
+	await f.command("unlock");
+	const updates: unknown[] = [];
+	const final = await f.exec(undefined, (update) => updates.push(update));
+	expect(updates).toHaveLength(2);
+	expect(updates[1]).toMatchObject({ details: { streaming: true, truncated: true } });
+	expect(Buffer.byteLength((updates[1] as { content: { text: string }[] }).content[0].text)).toBeLessThanOrEqual(48 * 1024);
+	expect(final).toMatchObject({ content: [{ text: "exit=0, cancelled=false, timedOut=false, truncated=false\nlive\ndone" }] });
+	await f.shutdown();
 });
 
 test("declined confirmation invokes no sudo", async () => {
@@ -241,20 +263,24 @@ test("TUI restoration failure revokes successful authentication", async () => {
 
 test("nonzero tool outcome is an actual Pi tool error and revokes", async () => {
 	const f = fixture({
-		run: async (invocation) =>
-			invocation.args[2] === "/usr/bin/id"
-				? { ...ok, code: 2, stderr: "denied" }
-				: ok,
+		run: async (invocation) => {
+			if (invocation.args[2] !== "/usr/bin/id") return ok;
+			invocation.onOutput?.({ stdout: "", stderr: "denied", truncated: false });
+			return { ...ok, code: 2, stderr: "denied" };
+		},
 	});
 	await f.command("unlock");
-	await expect(f.exec()).rejects.toThrow("exit=2");
+	const updates: unknown[] = [];
+	await expect(f.exec(undefined, (update) => updates.push(update))).rejects.toThrow("exit=2");
+	expect(updates).toHaveLength(2);
+	expect(updates[1]).toMatchObject({ content: [{ text: "denied" }] });
 	await expect(f.exec()).rejects.toThrow("locked");
 	await f.shutdown();
 });
 
-test("askpass is explicit, stays in TUI, and uses only auth invocation", async () => {
+test("configured askpass is automatic, stays in TUI, and uses only auth invocation", async () => {
 	const f = fixture({ askpass: () => "/trusted/helper" });
-	await f.command("unlock --askpass");
+	await f.command("unlock");
 	expect(f.events).toEqual(["idle", "confirm"]);
 	expect(f.calls.map((call) => call.args)).toEqual([
 		["-k"],
@@ -268,16 +294,51 @@ test("askpass is explicit, stays in TUI, and uses only auth invocation", async (
 	await f.exec();
 	await f.command("lock");
 	expect(f.calls.filter((call) => call.askpass)).toHaveLength(1);
-	const defaultMode = fixture({ askpass: () => "/trusted/helper" });
+	const defaultMode = fixture();
 	await defaultMode.command("unlock");
 	expect(defaultMode.calls[1].args).toEqual(["-v"]);
 	expect(defaultMode.calls[1].askpass).toBeUndefined();
 });
 
+test("retained --askpass alias requires SUDO_ASKPASS without terminal fallback", async () => {
+	for (const command of ["unlock --askpass", "unlock 1 --askpass"]) {
+		const absent = fixture();
+		await absent.command(command);
+		expect(absent.messages.at(-1)).toContain("--askpass requires SUDO_ASKPASS");
+		expect(absent.events).toEqual([]);
+		expect(absent.warnings).toEqual([]);
+		expect(absent.calls).toEqual([]);
+		await expect(absent.exec()).rejects.toThrow("locked");
+
+		const configured = fixture({ askpass: () => "/trusted/helper" });
+		await configured.command(command);
+		expect(configured.events).toEqual(["idle", "confirm"]);
+		expect(configured.warnings[0]).toContain("Mode: OS askpass (/trusted/helper).");
+		expect(configured.calls.map((call) => call.args)).toEqual([
+			["-k"], ["-A", "-v"], ["-n", "--", "/usr/bin/true"],
+		]);
+	}
+	const empty = fixture({
+		askpass: () => "",
+		resolveAskpass: () => { throw Error("invalid helper"); },
+	});
+	await empty.command("unlock --askpass");
+	expect(empty.messages.at(-1)).toContain("invalid helper");
+	expect(empty.events).toEqual([]);
+	expect(empty.warnings).toEqual([]);
+	expect(empty.calls).toEqual([]);
+
+	const normal = fixture();
+	await normal.command("unlock");
+	expect(normal.warnings[0]).toContain("Mode: terminal.");
+	expect(normal.events).toEqual(["idle", "confirm", "stop", "start"]);
+	expect(normal.calls[1]?.args).toEqual(["-v"]);
+});
+
 test("askpass gating, refusal, recheck, failure and lock during authentication", async () => {
 	for (const options of [{ mode: "rpc" }, { tty: false }]) {
 		const f = fixture({ ...options, askpass: () => "/trusted/helper" });
-		await f.command("unlock --askpass");
+		await f.command("unlock");
 		expect(f.calls).toHaveLength(0);
 	}
 	const absent = fixture({
@@ -286,13 +347,21 @@ test("askpass gating, refusal, recheck, failure and lock during authentication",
 			throw Error("missing helper");
 		},
 	});
-	await absent.command("unlock --askpass");
-	expect(absent.calls).toHaveLength(0);
+	await absent.command("unlock");
+	expect(absent.calls[1]?.args).toEqual(["-v"]);
+	const invalid = fixture({
+		askpass: () => "relative/helper",
+		resolveAskpass: () => { throw Error("untrusted helper"); },
+	});
+	await invalid.command("unlock");
+	expect(invalid.calls).toHaveLength(0);
+	expect(invalid.warnings).toHaveLength(0);
+	expect(invalid.messages.at(-1)).toContain("untrusted helper");
 	const refused = fixture({
 		askpass: () => "/trusted/helper",
 		confirm: async () => false,
 	});
-	await refused.command("unlock 2 --askpass");
+	await refused.command("unlock 2");
 	expect(refused.warnings[0]).toContain("Duration: up to 2 minute(s). Mode: OS askpass (/trusted/helper).");
 	expect(refused.calls).toHaveLength(0);
 	let checks = 0;
@@ -303,7 +372,7 @@ test("askpass gating, refusal, recheck, failure and lock during authentication",
 			return "/trusted/helper";
 		},
 	});
-	await changed.command("unlock --askpass");
+	await changed.command("unlock");
 	expect(changed.messages.at(-1)).toContain("changed helper");
 	expect(changed.calls.some((call) => call.args.includes("-A"))).toBe(false);
 	await expect(changed.exec()).rejects.toThrow("locked");
@@ -317,7 +386,7 @@ test("askpass gating, refusal, recheck, failure and lock during authentication",
 					})
 				: Promise.resolve(ok),
 	});
-	const attempt = pending.command("unlock --askpass");
+	const attempt = pending.command("unlock");
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	const locking = pending.command("lock");
 	expect(pending.calls[1].signal?.aborted).toBe(true);
@@ -364,7 +433,7 @@ test("askpass failure and helper substitution never grant or fall back", async (
 		run: async (call) =>
 			call.args[0] === "-A" ? { ...ok, code: 1, stderr: "PRIVATE-CANARY" } : ok,
 	});
-	await failed.command("unlock --askpass");
+	await failed.command("unlock");
 	expect(failed.messages.join(" ")).not.toContain("PRIVATE-CANARY");
 	expect(failed.calls.at(-1)?.args).toEqual(["-k"]);
 	await expect(failed.exec()).rejects.toThrow("locked");
@@ -378,9 +447,18 @@ test("askpass failure and helper substitution never grant or fall back", async (
 			return result;
 		},
 	});
-	await swapped.command("unlock --askpass");
+	await swapped.command("unlock");
 	expect(swapped.calls.some((call) => call.args.includes("-A"))).toBe(false);
 	await expect(swapped.exec()).rejects.toThrow("locked");
+	let env = "/trusted/helper";
+	// Confirmation is the boundary between selection and authentication.
+	const rechecked = fixture({ askpass: () => env, resolveAskpass: (value) => {
+		if (!value) throw Error("invalid helper");
+		return value;
+	}, confirm: async () => { env = ""; return true; } });
+	await rechecked.command("unlock");
+	expect(rechecked.calls.some((call) => call.args.includes("-A"))).toBe(false);
+	await expect(rechecked.exec()).rejects.toThrow("locked");
 });
 
 function fakeClock() {
@@ -555,6 +633,55 @@ test("initial invalidation spawn failure and restoration cleanup failure warn", 
 	expect(restore.statuses.at(-1)?.text).toBe("⚠️ sudo");
 	expect(restore.messages.at(-1)).toContain("cleanup spawn failure");
 	await restore.shutdown();
+});
+
+test("print executions leave no spinner IDs; live cancellation and shutdown stop timers", async () => {
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Parameters<NonNullable<ToolDefinition["renderCall"]>>[1];
+	let ticks = 0;
+	const context = (id: string) => ({ cwd: "/tmp", toolCallId: id, executionStarted: true, isPartial: true, expanded: false, invalidate: () => { ticks++; } }) as Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
+	const print = fixture({ mode: "print" });
+	for (let i = 0; i < 30; i++) {
+		await expect(print.exec(undefined, undefined, `print-${i}`)).rejects.toThrow("locked");
+		expect(print.renderCall({}, theme, context(`print-${i}`)).render(80)).toEqual(["# …"]);
+	}
+	await print.shutdown();
+	let release!: (outcome: Outcome) => void;
+	const live = fixture({ run: async (call) => call.args[2] === "/usr/bin/id" ? new Promise(resolve => { release = resolve; }) : ok });
+	await live.command("unlock");
+	const controller = new AbortController();
+	const executing = live.exec(controller.signal);
+	await Promise.resolve();
+	const active = live.renderCall({}, theme, context("id"));
+	expect(active.render(80).join(" ")).toContain("⠋");
+	controller.abort();
+	expect(live.renderCall({}, theme, context("id")).render(80)).toEqual(["# …"]);
+	release({ ...ok, cancelled: true });
+	await expect(executing).rejects.toThrow();
+	const before = ticks;
+	await Bun.sleep(550);
+	expect(ticks).toBe(before);
+	await live.shutdown();
+});
+
+test("shutdown stops an in-flight spinner and a replacement runtime cannot inherit it", async () => {
+	let release!: (outcome: Outcome) => void;
+	const f = fixture({ run: async (call) => call.args[2] === "/usr/bin/id" ? new Promise(resolve => { release = resolve; }) : ok });
+	await f.command("unlock");
+	const executing = f.exec();
+	await Promise.resolve();
+	let ticks = 0;
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Parameters<NonNullable<ToolDefinition["renderCall"]>>[1];
+	const context = { cwd: "/tmp", toolCallId: "id", executionStarted: true, isPartial: true, expanded: false, invalidate: () => { ticks++; } } as Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
+	expect(f.renderCall({}, theme, context).render(80).join(" ")).toContain("⠋");
+	const closing = f.shutdown();
+	expect(f.renderCall({}, theme, context).render(80)).toEqual(["# …"]);
+	const replacement = fixture();
+	expect(replacement.renderCall({}, theme, context).render(80)).toEqual(["# …"]);
+	release({ ...ok, cancelled: true });
+	await Promise.allSettled([executing, closing]);
+	await Bun.sleep(550);
+	expect(ticks).toBe(0);
+	await replacement.shutdown();
 });
 
 test("shutdown clears lightning before waiting for cleanup", async () => {

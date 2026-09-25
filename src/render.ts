@@ -12,6 +12,49 @@ interface DisplayArgs {
 }
 
 const PREVIEW_ROWS = 8;
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL_MS = 500;
+
+type CallComponent = { render(width: number): string[]; invalidate(): void };
+type CallState = {
+	frame: number;
+	startedAt: number;
+	timer?: ReturnType<typeof setInterval>;
+	invalidate?: () => void;
+};
+// Only execute() admits a live call. Renderer flags alone also describe HTML export.
+export function createCallRenderer() {
+	const callStates = new Map<string, CallState>();
+	const stop = (id: string) => {
+		const state = callStates.get(id);
+		if (!state) return;
+		if (state.timer) clearInterval(state.timer);
+		state.timer = undefined;
+		state.invalidate = undefined;
+		callStates.delete(id);
+	};
+	return {
+		start(id: string) {
+			stop(id);
+			callStates.set(id, { frame: 0, startedAt: Date.now() });
+		},
+		stop,
+		stopAll() {
+			for (const id of callStates.keys()) stop(id);
+		},
+		renderCall: (args: DisplayArgs, theme: Theme, context: ToolRenderContext) =>
+			renderCall(args, theme, context, callStates),
+	};
+}
+
+function elapsedTime(ms: number): string {
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 const CLEANUP_WARNING = "sudo -k cleanup failed; credential cache may remain valid";
 const OUTCOME_HEADER = /^(?:Error: )?exit=(-?\d+|null), cancelled=(true|false), timedOut=(true|false), truncated=(true|false)\n/;
 
@@ -92,7 +135,11 @@ export function renderCall(
 	args: DisplayArgs,
 	theme: Theme,
 	context: ToolRenderContext,
-) {
+	callStates?: Map<string, CallState>,
+): CallComponent {
+	const id = context.toolCallId;
+	const state = id && context.executionStarted && context.isPartial ? callStates?.get(id) : undefined;
+	const spinning = Boolean(state && context.invalidate);
 	// Arguments can arrive incrementally; rendering must not require a valid call.
 	const argv = [
 		typeof args?.executable === "string" ? argument(args.executable) : "…",
@@ -102,25 +149,39 @@ export function renderCall(
 	].join(" ");
 	const override = typeof args?.cwd === "string";
 	const cwd = override ? args.cwd! : context.cwd;
-	const call = display(
-		[],
-		[theme.fg("toolTitle", theme.bold("sudo_exec")) + " " + theme.fg("accent", argv)], [], context.expanded, 4,
-		(hint) => theme.fg("muted", hint),
-	);
 	const location = (override && cwd !== context.cwd) || context.expanded
 		? display([], [theme.fg("muted", `cwd: ${argument(cwd)}`)], [], context.expanded, 4,
 			(hint) => theme.fg("muted", hint))
 		: undefined;
-	return {
+	const note = context.expanded
+		? display([theme.fg("muted", "argv display only · not a shell command; do not copy as a shell command")], [], [], true)
+		: undefined;
+	const title = theme.fg("toolTitle", theme.bold("#"));
+	const command = theme.fg("accent", argv);
+	const component: CallComponent = {
 		render(width: number) {
+			const prefix = state?.timer ? theme.fg("warning", `${SPINNER_FRAMES[state.frame]} `) : "";
+			const elapsed = state?.timer ? theme.fg("muted", ` · ${elapsedTime(Date.now() - state.startedAt)}`) : "";
+			const line = prefix + title + " " + command + elapsed;
 			return [
-				...call.render(width),
+				...display([], [line], [], context.expanded, 4, (hint) => theme.fg("muted", hint)).render(width),
 				...(location?.render(width) ?? []),
-				...(context.expanded ? display([theme.fg("muted", "argv display only · not a shell command; do not copy as a shell command")], [], [], true).render(width) : []),
+				...(note?.render(width) ?? []),
 			];
 		},
 		invalidate() {},
 	};
+	if (state && spinning) {
+		state.invalidate = context.invalidate;
+		if (!state.timer) {
+			state.timer = setInterval(() => {
+				state!.frame = (state!.frame + 1) % SPINNER_FRAMES.length;
+				state!.invalidate?.();
+			}, SPINNER_INTERVAL_MS);
+			state.timer.unref?.();
+		}
+	}
+	return component;
 }
 
 interface ResultDetails {
@@ -161,7 +222,19 @@ export function renderResult(
 	theme: Theme,
 	context: ToolRenderContext,
 ) {
-	if (options.isPartial) return display([theme.fg("warning", "Running…")], [], [], true);
+	if (options.isPartial) {
+		const details = result.details && typeof result.details === "object" ? result.details as ResultDetails & { streaming?: boolean } : undefined;
+		const text = details?.streaming === true
+			? result.content.filter((item) => item.type === "text" && typeof item.text === "string")
+				.map((item) => item.text).join("\n")
+			: "";
+		const footers = details?.streaming && details.truncated
+			? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")]
+			: [];
+		return display([theme.fg("warning", "Running…"), ...(text ? [""] : [])],
+			text ? safeText(text).split("\n").map((line) => theme.fg("toolOutput", line)) : [],
+			footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint));
+	}
 	const details = result.details && typeof result.details === "object" ? result.details as ResultDetails : undefined;
 	const text = result.content.filter((item) => item.type === "text" && typeof item.text === "string")
 		.map((item) => item.text).join("\n");

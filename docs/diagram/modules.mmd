@@ -6,7 +6,7 @@ flowchart TB
     Entry --> Output["src/output.ts<br/>최종 UTF-8 출력 제한"]
     Access --> Process["src/process.ts<br/>spawn·신호·출력 한도"]
     Process --> Sudo["/usr/bin/sudo<br/>Pi의 직접 자식<br/>종료 감시 대상"]
-    Sudo -. "--askpass 선택 시 sudo -A -v" .-> HelperOS["OS askpass 도우미<br/>Pi가 직접 실행하지 않음"]
+    Sudo -. "SUDO_ASKPASS 설정 시 sudo -A -v" .-> HelperOS["OS askpass 도우미<br/>Pi가 직접 실행하지 않음"]
     Sudo --> Policy["OS sudo 정책·공유 timestamp"]
     Sudo --> Child["sudo가 실행하는 대상 명령<br/>후손 가능<br/>전체 종료 보장 없음"]
     Entry -. "상태 표시" .-> User

@@ -12,6 +12,8 @@ export type Invocation = {
 	askpass?: string;
 	timeoutMs: number;
 	signal?: AbortSignal;
+	/** Execution only: bounded snapshots; never attach to auth, probe or cleanup. */
+	onOutput?: (output: Pick<Outcome, "stdout" | "stderr" | "truncated">) => void;
 };
 export type Outcome = {
 	code: number | null;
@@ -43,6 +45,7 @@ export function sudoPath(): string {
 }
 
 const OUTPUT_LIMIT = 32 * 1024;
+const UPDATE_INTERVAL_MS = 150;
 
 export const runProcess: Runner = (invocation) =>
 	new Promise((resolve, reject) => {
@@ -67,9 +70,13 @@ export const runProcess: Runner = (invocation) =>
 					? "inherit"
 					: ["ignore", "pipe", "pipe"],
 		});
-		let stdout: Buffer = Buffer.alloc(0);
-		let stderr: Buffer = Buffer.alloc(0);
+		// Allocate only on first data; avoid copying the retained prefix per chunk.
+		let stdout: Buffer | undefined;
+		let stderr: Buffer | undefined;
+		let stdoutLength = 0;
+		let stderrLength = 0;
 		let truncated = false;
+		let updateTimer: ReturnType<typeof setTimeout> | undefined;
 		let cancelled = false;
 		let timedOut = false;
 		// Promise settlement, direct-child exit, and pipe closure are different events.
@@ -78,25 +85,54 @@ export const runProcess: Runner = (invocation) =>
 		let exitCode: number | null = null;
 		let killTimer: ReturnType<typeof setTimeout> | undefined;
 		let settleTimer: ReturnType<typeof setTimeout> | undefined;
-		const append = (current: Buffer, chunk: Buffer) => {
-			if (current.length + chunk.length > OUTPUT_LIMIT) truncated = true;
-			if (current.length === OUTPUT_LIMIT) return current;
-			return Buffer.concat([
-				current,
-				chunk.subarray(0, OUTPUT_LIMIT - current.length),
-			]);
+		const scheduleUpdate = () => {
+			if (settled || cancelled || !invocation.onOutput || updateTimer) return;
+			updateTimer = setTimeout(() => {
+				updateTimer = undefined;
+				if (settled || cancelled) return;
+				try {
+					invocation.onOutput?.({
+						stdout: stdout?.subarray(0, stdoutLength).toString("utf8") ?? "",
+						stderr: stderr?.subarray(0, stderrLength).toString("utf8") ?? "",
+						truncated,
+					});
+				} catch {
+					// UI updates must not change execution or revocation.
+				}
+			}, UPDATE_INTERVAL_MS);
+			updateTimer.unref?.();
 		};
 		child.stdout?.on("data", (chunk: Buffer) => {
-			stdout = append(stdout, chunk);
+			if (settled) return;
+			const length = Math.min(chunk.length, OUTPUT_LIMIT - stdoutLength);
+			if (length) {
+				stdout ??= Buffer.allocUnsafe(OUTPUT_LIMIT);
+				chunk.copy(stdout, stdoutLength, 0, length);
+				stdoutLength += length;
+			}
+			const wasTruncated = truncated;
+			if (length < chunk.length) truncated = true;
+			if (length || !wasTruncated && truncated) scheduleUpdate();
 		});
 		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr = append(stderr, chunk);
+			if (settled) return;
+			const length = Math.min(chunk.length, OUTPUT_LIMIT - stderrLength);
+			if (length) {
+				stderr ??= Buffer.allocUnsafe(OUTPUT_LIMIT);
+				chunk.copy(stderr, stderrLength, 0, length);
+				stderrLength += length;
+			}
+			const wasTruncated = truncated;
+			if (length < chunk.length) truncated = true;
+			if (length || !wasTruncated && truncated) scheduleUpdate();
 		});
 		const finish = () => {
 			settled = true;
 			clearTimeout(timer);
 			if (killTimer) clearTimeout(killTimer);
 			if (settleTimer) clearTimeout(settleTimer);
+			if (updateTimer) clearTimeout(updateTimer);
+			updateTimer = undefined;
 			invocation.signal?.removeEventListener("abort", onAbort);
 			child.stdout?.destroy();
 			child.stderr?.destroy();
@@ -106,8 +142,8 @@ export const runProcess: Runner = (invocation) =>
 			finish();
 			resolve({
 				code,
-				stdout: stdout.toString("utf8"),
-				stderr: stderr.toString("utf8"),
+				stdout: stdout?.subarray(0, stdoutLength).toString("utf8") ?? "",
+				stderr: stderr?.subarray(0, stderrLength).toString("utf8") ?? "",
 				truncated,
 				cancelled,
 				timedOut,
@@ -124,6 +160,8 @@ export const runProcess: Runner = (invocation) =>
 		const terminate = () => {
 			if (settled || cancelled) return;
 			cancelled = true;
+			if (updateTimer) clearTimeout(updateTimer);
+			updateTimer = undefined;
 			// The direct process may have already exited while a descendant holds the pipes.
 			if (exited) {
 				complete(exitCode);
