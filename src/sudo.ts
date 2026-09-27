@@ -66,9 +66,12 @@ export function validateExec(
  * One auth/exec operation may run at a time; lock closes admission synchronously
  * and waits for that operation before a final best-effort timestamp invalidation.
  */
+export type ReauthTicket = { readonly reauth: unique symbol };
+
 export class SudoAccess {
 	private deadline?: number;
 	private wallDeadline?: number;
+	private pendingReauth?: { ticket: ReauthTicket; generation: number; deadline: number; wallDeadline?: number };
 	private timer?: ReturnType<typeof setTimeout>;
 	private active?: Promise<unknown>;
 	private abort?: AbortController;
@@ -120,6 +123,7 @@ export class SudoAccess {
 		this.generation++;
 		this.deadline = undefined;
 		this.wallDeadline = undefined;
+		this.pendingReauth = undefined;
 		if (this.timer) this.time.clearTimeout(this.timer);
 		this.timer = undefined;
 		this.onChange();
@@ -163,6 +167,54 @@ export class SudoAccess {
 			throw new Error(`sudo -k failed; credential cache may remain valid (${result.cancelled ? "cancelled" : result.timedOut ? "timed out" : `exit ${result.code}`})`);
 	}
 
+	/** Revoke admission synchronously, before UI waits. The handle cannot mint or extend a grant. */
+	beginReauth(): ReauthTicket {
+		if (this.active || this.locking || this.poisoned) throw new Error("Sudo is busy or unavailable");
+		const remaining = this.remainingMs();
+		if (!remaining) throw new Error("Sudo is locked or expired; use /sudo unlock first");
+		const deadline = this.deadline!;
+		const wallDeadline = this.wallDeadline;
+		this.clear();
+		const ticket = {} as ReauthTicket;
+		const generation = this.generation;
+		this.pendingReauth = { ticket, generation, deadline, wallDeadline };
+		this.timer = this.time.setTimeout(() => { void this.lock().catch(this.onExpiryError); }, remaining);
+		this.timer.unref?.();
+		return ticket;
+	}
+
+	/** Display-only bound; authentication still checks the private deadlines. */
+	reauthRemainingMs(ticket: ReauthTicket): number {
+		const pending = this.pendingReauth;
+		if (!pending || pending.ticket !== ticket || pending.generation !== this.generation)
+			throw new Error("Reauth was revoked");
+		const remaining = Math.min(pending.deadline - this.time.now(),
+			pending.wallDeadline === undefined ? Infinity : pending.wallDeadline - this.time.wallNow!());
+		if (remaining <= 0) {
+			void this.lock().catch(this.onExpiryError);
+			throw new Error("Reauth expired");
+		}
+		return remaining;
+	}
+
+	/** Only the current handle can clean up its own abandoned attempt. */
+	async abandonReauth(ticket: ReauthTicket): Promise<void> {
+		if (this.pendingReauth?.ticket === ticket) await this.lock();
+	}
+
+	async reauth(ticket: ReauthTicket, interactive: boolean, askpass?: () => string): Promise<void> {
+		if (!interactive) throw new Error("Reauth requires interactive Pi TUI and a real terminal");
+		const pending = this.pendingReauth;
+		if (!pending || pending.ticket !== ticket || pending.generation !== this.generation)
+			throw new Error("Reauth was revoked");
+		if (this.active || this.locking) throw new Error("Sudo is busy");
+		this.reauthRemainingMs(ticket);
+		this.pendingReauth = undefined;
+		if (this.timer) this.time.clearTimeout(this.timer);
+		this.timer = undefined;
+		return this.authenticate(pending.generation, pending.deadline, pending.wallDeadline, askpass);
+	}
+
 	async unlock(
 		minutes: number,
 		interactive: boolean,
@@ -174,10 +226,15 @@ export class SudoAccess {
 			);
 		if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_MINUTES)
 			throw new Error("Duration must be 1–180 minutes");
-		if (this.active || this.locking) throw new Error("Sudo is busy");
+		if (this.active || this.locking || this.pendingReauth) throw new Error("Sudo is busy");
 		if (this.deadline !== undefined)
 			throw new Error("Already unlocked; lock first (no automatic renewal)");
 		const generation = ++this.generation;
+		return this.authenticate(generation, undefined, undefined, askpass, minutes);
+	}
+
+	private authenticate(generation: number, originalDeadline: number | undefined, originalWallDeadline: number | undefined,
+		askpass: (() => string) | undefined, minutes?: number): Promise<void> {
 		return this.start(async (signal) => {
 			let invalidated = false;
 			try {
@@ -228,14 +285,19 @@ export class SudoAccess {
 					throw new Error(signal.aborted ? "Unlock cancelled during sudo execution probe" : probeFailure(probe));
 				if (generation !== this.generation)
 					throw new Error("Unlock was revoked");
-				// Start the fixed grant only after the real noninteractive probe succeeds.
-				this.deadline = this.time.now() + minutes * 60_000;
-				this.wallDeadline = this.time.wallNow
-					? this.time.wallNow() + minutes * 60_000
-					: undefined;
+				// Reauth never resets either clock, even while consent/authentication takes time.
+				const now = this.time.now();
+				const wallNow = this.time.wallNow?.();
+				const deadline = originalDeadline ?? now + minutes! * 60_000;
+				const wallDeadline = originalDeadline === undefined && wallNow !== undefined
+					? wallNow + minutes! * 60_000 : originalWallDeadline;
+				const remaining = Math.min(deadline - now, wallDeadline === undefined ? Infinity : wallDeadline - wallNow!);
+				if (remaining <= 0) throw new Error("Reauth expired before completion");
+				this.deadline = deadline;
+				this.wallDeadline = wallDeadline;
 				this.timer = this.time.setTimeout(() => {
 					void this.lock().catch(this.onExpiryError);
-				}, minutes * 60_000);
+				}, remaining);
 				this.timer.unref?.();
 				this.onChange();
 			} catch (error) {

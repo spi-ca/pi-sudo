@@ -10,7 +10,7 @@ import type {
 import { trustedAskpass } from "./src/askpass.js";
 import { boundedError, boundedText, formatOutcome } from "./src/output.js";
 import { runProcess, sudoPath, type Runner } from "./src/process.js";
-import { SudoAccess, validMinutes, type Clock } from "./src/sudo.js";
+import { SudoAccess, validMinutes, type Clock, type ReauthTicket } from "./src/sudo.js";
 import { createCallRenderer, renderResult } from "./src/render.js";
 
 const approvalWarnings = [
@@ -20,8 +20,10 @@ const approvalWarnings = [
 	"• This terminal's sudo cache may be shared.",
 ];
 
-async function approveUnlock(ui: ExtensionUIContext, minutes: number, mode: string): Promise<boolean> {
-	const prompt = `Allow sudo_exec to run as administrator for up to ${minutes} ${minutes === 1 ? "minute" : "minutes"}?`;
+async function approveUnlock(ui: ExtensionUIContext, minutes: number, mode: string, reauth = false, signal?: AbortSignal): Promise<boolean> {
+	const prompt = reauth
+		? `Reauthenticate sudo_exec for the remaining window (at most ${minutes} ${minutes === 1 ? "minute" : "minutes"}; no extension)?`
+		: `Allow sudo_exec to run as administrator for up to ${minutes} ${minutes === 1 ? "minute" : "minutes"}?`;
 	const authentication = mode === "terminal" ? "Authenticate in this terminal" : `Authenticate with ${mode}`;
 	// The askpass path can be arbitrarily long. Reject, rather than let the
 	// questionnaire silently shorten a disclosure or drop a risk warning.
@@ -39,52 +41,78 @@ async function approveUnlock(ui: ExtensionUIContext, minutes: number, mode: stri
 		questions[0]?.defaultValues.length !== 1 || questions[0]?.defaultValues[0] !== "no" ||
 		questions[0]?.allowOther || questions[0]?.optional || questions[0]?.multiSelect || questions[0]?.requireReview)
 		throw new Error("Sudo consent disclosure cannot be shown intact");
-	const result = await ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
-		let shown: { width: number; columns: number; rows: number; lines: number } | undefined;
-		let component: ReturnType<typeof createQuestionnaireComponent>;
-		const fullFrame = (width: number) => component.render(width);
-		const fits = (width: number, lines: number) =>
-			width >= 32 && width === tui.terminal.columns &&
-			lines <= Math.max(0, tui.terminal.rows - 5);
-		const contains = (child: TUI["children"][number]): boolean =>
-			child === wrapper || (child instanceof Container && child.children.some(contains));
-		const canSubmit = (answer: QuestionnaireResult): boolean => {
-			const selected = answer.answers.find(item => item.id === "sudo");
-			if (selected?.kind === "single" && selected.value === "no") return true;
-			if (selected?.kind !== "single" || selected.value !== "yes") return false;
-			const width = tui.terminal.columns;
-			const lines = fullFrame(width).length;
-			if (shown && shown.width === width && shown.columns === width &&
-				shown.rows === tui.terminal.rows && shown.lines === lines && fits(width, lines)) {
-				// Pi 0.87.1 mounts the transcript first, then fixed dock components.
-				// Reserve every dock sibling at full height and one transcript row.
-				const owner = tui.children.find(contains);
-				const siblings = tui.children.slice(1).filter(child => child !== owner);
-				const available = tui.terminal.rows - 1 - siblings.reduce((rows, child) => rows + child.render(width).length, 0);
-				if (owner && owner !== tui.children[0] && lines <= available) return true;
-			}
-			ui.notify("Sudo consent is clipped; enlarge the terminal or reduce widgets, then confirm again. Esc cancels.", "warning");
-			return false;
-		};
-		component = createQuestionnaireComponent({ questions, tui, theme, keybindings, done, canSubmit });
-		const wrapper = {
-			get focused() { return component.focused; },
-			set focused(value: boolean) { component.focused = value; },
-			render(width: number) {
-				const lines = fullFrame(width);
-				shown = fits(width, lines.length)
-					? { width, columns: tui.terminal.columns, rows: tui.terminal.rows, lines: lines.length }
-					: undefined;
-				return shown ? lines : [truncateToWidth(theme.fg("warning", "Resize / Esc to cancel"), Math.max(1, width), "")];
-			},
-			invalidate() { shown = undefined; component.invalidate(); },
-			handleInput(data: string) { component.handleInput(data); },
-			handleMouse(event: Parameters<typeof component.handleMouse>[0]) { return component.handleMouse(event); },
-		};
-		return wrapper;
+	const cancelled: QuestionnaireResult = { cancelled: true, questions, answers: [] };
+	let dismiss: (() => void) | undefined;
+	const onAbort = () => dismiss?.();
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		const result = await ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
+			dismiss = () => done(cancelled);
+			if (signal?.aborted) dismiss();
+			let shown: { width: number; columns: number; rows: number; lines: number } | undefined;
+			let component: ReturnType<typeof createQuestionnaireComponent>;
+			const fullFrame = (width: number) => component.render(width);
+			const fits = (width: number, lines: number) =>
+				width >= 32 && width === tui.terminal.columns &&
+				lines <= Math.max(0, tui.terminal.rows - 5);
+			const contains = (child: TUI["children"][number]): boolean =>
+				child === wrapper || (child instanceof Container && child.children.some(contains));
+			const canSubmit = (answer: QuestionnaireResult): boolean => {
+				const selected = answer.answers.find(item => item.id === "sudo");
+				if (selected?.kind === "single" && selected.value === "no") return true;
+				if (selected?.kind !== "single" || selected.value !== "yes") return false;
+				const width = tui.terminal.columns;
+				const lines = fullFrame(width).length;
+				if (shown && shown.width === width && shown.columns === width &&
+					shown.rows === tui.terminal.rows && shown.lines === lines && fits(width, lines)) {
+					// Pi 0.87.1 mounts the transcript first, then fixed dock components.
+					// Reserve every dock sibling at full height and one transcript row.
+					const owner = tui.children.find(contains);
+					const siblings = tui.children.slice(1).filter(child => child !== owner);
+					const available = tui.terminal.rows - 1 - siblings.reduce((rows, child) => rows + child.render(width).length, 0);
+					if (owner && owner !== tui.children[0] && lines <= available) return true;
+				}
+				ui.notify("Sudo consent is clipped; enlarge the terminal or reduce widgets, then confirm again. Esc cancels.", "warning");
+				return false;
+			};
+			component = createQuestionnaireComponent({ questions, tui, theme, keybindings, done, canSubmit });
+			const wrapper = {
+				get focused() { return component.focused; },
+				set focused(value: boolean) { component.focused = value; },
+				render(width: number) {
+					const lines = fullFrame(width);
+					shown = fits(width, lines.length)
+						? { width, columns: tui.terminal.columns, rows: tui.terminal.rows, lines: lines.length }
+						: undefined;
+					return shown ? lines : [truncateToWidth(theme.fg("warning", "Resize / Esc to cancel"), Math.max(1, width), "")];
+				},
+				invalidate() { shown = undefined; component.invalidate(); },
+				handleInput(data: string) { component.handleInput(data); },
+				handleMouse(event: Parameters<typeof component.handleMouse>[0]) { return component.handleMouse(event); },
+			};
+			return wrapper;
+		});
+		return !signal?.aborted && !result.cancelled && result.answers.some(answer =>
+			answer.id === "sudo" && answer.kind === "single" && answer.value === "yes");
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
+// waitForIdle has no cancellation API in Pi 0.87.1. Release this command's
+// ownership on revocation without waiting for a potentially long agent turn.
+async function waitForIdleOrRevoked(waitForIdle: () => Promise<void>, signal: AbortSignal): Promise<void> {
+	if (signal.aborted) throw new Error("Unlock was revoked");
+	let onAbort!: () => void;
+	const revoked = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(new Error("Unlock was revoked"));
+		signal.addEventListener("abort", onAbort, { once: true });
 	});
-	return !result.cancelled && result.answers.some(answer =>
-		answer.id === "sudo" && answer.kind === "single" && answer.value === "yes");
+	try {
+		await Promise.race([waitForIdle(), revoked]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 // sudo inherits the real TTY. In regular mode, stop() moves below the footer;
@@ -175,7 +203,7 @@ export default function sudoExtension(
 		} else if (cacheWarning) {
 			label = "⚠️ sudo";
 			color = "error";
-		} else if (pendingUnlock && pendingEpoch === authorizationEpoch) {
+		} else if (pending && pending.epoch === authorizationEpoch) {
 			label = "⏳ sudo";
 			color = "warning";
 		}
@@ -186,12 +214,11 @@ export default function sudoExtension(
 		const displayLabel = remaining > 0 && remaining <= 30_000 ? ui.theme.bold(label) : label;
 		ui.setStatus("pi-sudo", ui.theme.fg(color, displayLabel));
 	}
-	let pendingEpoch = -1;
+	let pending: { epoch: number; abort: AbortController } | undefined;
 	// Cleanup ownership, not authorization: only SudoAccess can admit an execution.
 	let touched = false;
 	// Fence UI awaits before unlock starts; SudoAccess.generation fences the later auth awaits.
 	let authorizationEpoch = 0;
-	let pendingUnlock = false;
 	// Recheck the sudo binary for every child, including late cleanup after a host failure.
 	const checkedRun: Runner = async (invocation) => {
 		const invalidating = invocation.args[0] === "-k";
@@ -234,7 +261,7 @@ export default function sudoExtension(
 
 	pi.registerCommand("sudo", {
 		description:
-			"Explicit sudo unlock [1–180 minutes], lock, or status (interactive terminal only)",
+			"Explicit sudo unlock [1–180 minutes], reauth, lock, or status (interactive terminal only)",
 		handler: async (raw, ctx) => {
 			if (!closed) ui = ctx.ui;
 			const parts = raw.trim().split(/\s+/);
@@ -249,6 +276,7 @@ export default function sudoExtension(
 					);
 				} else if (parts[0] === "lock" && parts.length === 1) {
 					authorizationEpoch++;
+					pending?.abort.abort();
 					touched = true;
 					updateStatus();
 					try {
@@ -265,50 +293,56 @@ export default function sudoExtension(
 						"info",
 					);
 				} else if (
-					parts[0] === "unlock" &&
-					parts.length <= 3 &&
-					(parts.length < 3 ||
-						(parts[2] === "--askpass" && parts[1] !== "--askpass"))
+					(parts[0] === "reauth" && parts.length === 1) ||
+					(parts[0] === "unlock" && parts.length <= 3 &&
+						(parts.length < 3 || (parts[2] === "--askpass" && parts[1] !== "--askpass")))
 				) {
+					const reauth = parts[0] === "reauth";
 					const minutesArg = parts[1] === "--askpass" ? undefined : parts[1];
-					const minutes = minutesArg ? validMinutes(minutesArg) : 5;
+					const minutes = reauth ? 0 : minutesArg ? validMinutes(minutesArg) : 5;
 					if (ctx.mode !== "tui" || !hasTerminal()) {
+						if (reauth && access.remainingMs() > 0) await access.lock();
 						throw new Error(
 							"Unlock requires Pi TUI with real terminal stdin, stdout and stderr",
 						);
 					}
-					ensureHost();
-					if (access.remainingMs() > 0) throw new Error("Already unlocked; lock first (no automatic renewal)");
-					const selectedAskpass = askpassEnvironment();
-					if (parts.includes("--askpass") && selectedAskpass === undefined)
-						throw new Error("--askpass requires SUDO_ASKPASS");
-					const helper = selectedAskpass === undefined ? undefined : resolveAskpass(selectedAskpass);
-					if (pendingUnlock) throw new Error("Sudo unlock is already pending");
-					pendingUnlock = true;
-					const epoch = authorizationEpoch;
-					pendingEpoch = epoch;
+					try { ensureHost(); }
+					catch (error) {
+						if (reauth && access.remainingMs() > 0) await access.lock();
+						throw error;
+					}
+					if (pending) throw new Error("Sudo unlock is already pending");
+					if (!reauth && access.remainingMs() > 0) throw new Error("Already unlocked; lock first (no automatic renewal)");
+					// SudoAccess captures both deadlines and revokes before any UI await.
+					const ticket: ReauthTicket | undefined = reauth ? access.beginReauth() : undefined;
+					const attempt = { epoch: authorizationEpoch, abort: new AbortController() };
+					pending = attempt;
+					const epoch = attempt.epoch;
 					updateStatus();
 					try {
-						// Do not lend the terminal to sudo while the agent is still producing output.
-						await ctx.waitForIdle();
-						if (epoch !== authorizationEpoch)
+						const selectedAskpass = askpassEnvironment();
+						if (parts.includes("--askpass") && selectedAskpass === undefined)
+							throw new Error("--askpass requires SUDO_ASKPASS");
+						const helper = selectedAskpass === undefined ? undefined : resolveAskpass(selectedAskpass);
+						if (epoch !== authorizationEpoch || closed)
 							throw new Error("Unlock was revoked");
 						const displayHelper = helper?.replace(/[\x00-\x1f\x7f-\x9f]/g, (char) =>
 							`\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
 						);
 						const approved = await approveUnlock(
-							ctx.ui, minutes, displayHelper ? `OS askpass (${displayHelper})` : "terminal",
+							ctx.ui, reauth ? Math.ceil(access.reauthRemainingMs(ticket!) / 60_000) : minutes,
+							displayHelper ? `OS askpass (${displayHelper})` : "terminal", reauth, attempt.abort.signal,
 						);
 						if (!approved) return;
-						if (epoch !== authorizationEpoch)
+						// Consent is shown during the agent turn, but sudo must not take
+						// the terminal (or start askpass) until the turn has settled.
+						await waitForIdleOrRevoked(() => ctx.waitForIdle(), attempt.abort.signal);
+						if (epoch !== authorizationEpoch || closed || attempt.abort.signal.aborted)
 							throw new Error("Unlock was revoked");
 						// No password enters Pi input dialogs, tools, pipes, transcripts or model context.
 						const authenticate = () => {
 							touched = true;
-							return access.unlock(
-								minutes,
-								true,
-								helper
+							const authHelper = helper
 									? () => {
 											const selected = askpassEnvironment();
 											if (selected === undefined)
@@ -320,8 +354,8 @@ export default function sudoExtension(
 												);
 											return current;
 										}
-									: undefined,
-							);
+									: undefined;
+							return ticket ? access.reauth(ticket, true, authHelper) : access.unlock(minutes, true, authHelper);
 						};
 						if (helper) {
 							await authenticate();
@@ -388,12 +422,19 @@ export default function sudoExtension(
 							);
 						}
 					} finally {
-						pendingUnlock = false;
-						updateStatus();
+						try {
+							if (ticket) await access.abandonReauth(ticket);
+						} catch (error) {
+							cacheWarning = true;
+							throw error;
+						} finally {
+							if (pending === attempt) pending = undefined;
+							updateStatus();
+						}
 					}
 				} else {
 					throw new Error(
-						"Usage: /sudo unlock [minutes] | /sudo lock | /sudo status",
+						"Usage: /sudo unlock [minutes] | /sudo reauth | /sudo lock | /sudo status",
 					);
 				}
 			} catch (error) {
@@ -517,6 +558,7 @@ export default function sudoExtension(
 	// No grant is persisted or carried into a replacement extension runtime.
 	pi.on("session_shutdown", async (_event, ctx) => {
 		authorizationEpoch++;
+		pending?.abort.abort();
 		closed = true;
 		callRenderer.stopAll();
 		ctx.ui.setStatus("pi-sudo", undefined);

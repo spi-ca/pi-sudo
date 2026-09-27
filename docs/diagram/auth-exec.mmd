@@ -6,7 +6,8 @@ sequenceDiagram
     participant Proc as runProcess
     participant OS as sudo / 정책
     User->>Entry: /sudo unlock [1..180]
-    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, waitForIdle, epoch 확인, 모드 명시 후 NO 기본 선택 확인
+    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, epoch 확인, 모드 명시 후 NO 기본 선택 확인
+    Entry->>Entry: YES 후 waitForIdle, epoch 확인 (NO는 인증 없이 종료)
     opt 터미널 모드
         Entry->>Entry: 일반 stop()으로 UI 아래 이동 / fullscreen stop(preserveScreen)으로 기록 출력 방지, 짧은 안내
     end

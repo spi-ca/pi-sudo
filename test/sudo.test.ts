@@ -354,3 +354,62 @@ test("askpass auth-only invocation expires with no renewal", async () => {
 	await expect(f.access.exec("/usr/bin/id", [])).rejects.toThrow("locked");
 	expect(f.calls.at(-1)?.args).toEqual(["-k"]);
 });
+
+test("reauth revokes before consent, retains both deadlines and does not retry commands", async () => {
+	let mono = 0, wall = 0;
+	const calls: Invocation[] = [];
+	const time: Clock = { now: () => mono, wallNow: () => wall, setTimeout, clearTimeout };
+	const access = new SudoAccess(async call => { calls.push(call); return ok; }, "/usr/bin/sudo", time);
+	await access.unlock(1, true);
+	mono = 10_000; wall = 10_000;
+	const ticket = access.beginReauth();
+	expect(access.remainingMs()).toBe(0);
+	await expect(access.exec("/usr/bin/id", [])).rejects.toThrow("locked");
+	expect(access.reauthRemainingMs(ticket)).toBe(50_000);
+	mono = 20_000; wall = 35_000;
+	await access.reauth(ticket, true, () => "/trusted/helper");
+	expect(access.remainingMs()).toBe(25_000);
+	expect(calls.slice(3).map(call => call.args)).toEqual([["-k"], ["-A", "-v"], ["-n", "--", "/usr/bin/true"]]);
+	expect(calls.some(call => call.args.includes("/usr/bin/id"))).toBe(false);
+	await expect(access.reauth(ticket, true)).rejects.toThrow("revoked");
+	await access.lock();
+});
+
+test("reauth rejection, auth/probe failure, and either clock expiring leave access locked", async () => {
+	for (const failure of ["decline", "auth", "probe", "mono", "wall"]) {
+		let mono = 0, wall = 0;
+		let reauthing = false;
+		const calls: Invocation[] = [];
+		const time: Clock = { now: () => mono, wallNow: () => wall, setTimeout, clearTimeout };
+		const access = new SudoAccess(async call => {
+			calls.push(call);
+			if (reauthing && ((failure === "auth" && call.args[0] === "-v") ||
+				(failure === "probe" && call.args[0] === "-n"))) return fail;
+			if (reauthing && call.args[0] === "-n") {
+				if (failure === "mono") mono = 61_000;
+				if (failure === "wall") wall = 61_000;
+			}
+			return ok;
+		}, "/usr/bin/sudo", time);
+		await access.unlock(1, true);
+		const ticket = access.beginReauth();
+		reauthing = true;
+		if (failure === "decline") await access.abandonReauth(ticket);
+		else await expect(access.reauth(ticket, true)).rejects.toThrow();
+		expect(access.remainingMs()).toBe(0);
+		expect(calls.at(-1)?.args).toEqual(["-k"]);
+		await expect(access.reauth(ticket, true)).rejects.toThrow("revoked");
+	}
+});
+
+test("reauth stale handles cannot resurrect grants after explicit lock or a new unlock", async () => {
+	const f = fixture();
+	await f.access.unlock(1, true);
+	const ticket = f.access.beginReauth();
+	await expect(f.access.unlock(2, true)).rejects.toThrow("busy");
+	await f.access.lock();
+	await f.access.unlock(2, true);
+	await f.access.abandonReauth(ticket);
+	await expect(f.access.reauth(ticket, true)).rejects.toThrow("revoked");
+	expect(f.access.remainingMs()).toBe(120_000);
+});

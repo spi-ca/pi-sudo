@@ -68,7 +68,8 @@ sequenceDiagram
     participant Proc as runProcess
     participant OS as sudo / 정책
     User->>Entry: /sudo unlock [1..180]
-    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, waitForIdle, epoch 확인, 모드 명시 후 NO 기본 선택 확인
+    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, epoch 확인, 모드 명시 후 NO 기본 선택 확인
+    Entry->>Entry: YES 후 waitForIdle, epoch 확인 (NO는 인증 없이 종료)
     opt 터미널 모드
         Entry->>Entry: 일반 stop()으로 UI 아래 이동 / fullscreen stop(preserveScreen)으로 기록 출력 방지, 짧은 안내
     end
@@ -101,7 +102,9 @@ sequenceDiagram
 
 <!-- diagram:auth-exec:end -->
 
-`index.ts`의 `authorizationEpoch`는 대기 중인 `waitForIdle`/확인이 잠금 또는 종료 뒤 늦게 성공하는 일을 막습니다. `pendingUnlock`은 확인 UI 중복을 차단합니다. `touched`는 sudo 경로에 진입했는지 기록해 도구의 최초 사용과 shutdown 정리를 게이트할 뿐, **접근 허가 상태가 아닙니다**. 실제 허가는 `SudoAccess`의 기한 확인으로 판정합니다. `src/sudo.ts`의 `generation`은 비동기 인증 완료가 이미 철회된 접근을 다시 여는 일을 막고, `active`/`locking`은 실행과 잠금 작업이 경합하지 않게 합니다.
+위 그림은 새 잠금 해제의 인증·실행 흐름을 보여 줍니다. 별도 `/sudo reauth` 경로는 살아 있는 허가에서 `SudoAccess.beginReauth()`가 확인 대기 전에 접근을 철회하고 원래 두 기한을 내부에 보관합니다. 단일 사용 핸들의 generation을 검사해 동일한 인증·시험 절차로 다시 열며, 확인·인증 중 지난 시간을 차감합니다. 거절·취소·실패·만료 시 잠긴 상태와 캐시 무효화 시도를 유지하고 명령은 자동 재시도하지 않습니다. 상태 그림의 Pending/Revoking 구분에도 이 재인증 흐름이 포함됩니다.
+
+`index.ts`는 확인창을 에이전트 실행 중에도 바로 표시하고, YES일 때만 `waitForIdle` 뒤 인증을 시작합니다. `authorizationEpoch`와 시도별 취소 신호는 잠금·종료 시 확인창을 닫고 취소 API가 없는 `waitForIdle` 대기를 경합 없이 해제합니다. 늦게 완료된 idle 대기는 인증을 시작하지 않습니다. 시도별 pending 소유권은 확인 UI 중복과 이전 시도의 정리가 새 시도를 지우는 일을 막습니다. `touched`는 sudo 경로에 진입했는지 기록해 도구의 최초 사용과 shutdown 정리를 게이트할 뿐, **접근 허가 상태가 아닙니다**. 실제 허가는 `SudoAccess`의 기한 확인으로 판정합니다. `src/sudo.ts`의 `generation`은 비동기 인증 완료가 이미 철회된 접근을 다시 여는 일을 막고, `active`/`locking`은 실행과 잠금 작업이 경합하지 않게 합니다.
 
 `SUDO_ASKPASS`가 없으면 실제 터미널을 상속시키고, 설정되면 확인 화면에서 검증된 도우미를 알린 뒤 sudo 인증 자식에게만 환경 변수를 전달하고 표준 입출력을 무시합니다. 잘못된 설정이나 인증 실패는 터미널 방식으로 대체하지 않습니다. 도우미 검사는 확인 전과 인증 직전에 수행합니다. `src/output.ts`는 도구 결과의 헤더·정리 경고까지 포함해 UTF-8 크기와 줄 수를 제한합니다., 실행·시험·무효화에는 출력 크기가 제한된 파이프(표준 입력은 무시)를 사용합니다. 모두 같은 Pi 프로세스를 부모로 하는 non-detached 직접 자식이므로 같은 sudo timestamp 범위를 사용하는 구성을 시험할 수 있지만, sudoers 정책이나 OS 캐시 구성을 강제하지는 않습니다.
 
