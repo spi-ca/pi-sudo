@@ -32,4 +32,4 @@ sequenceDiagram
     Proc-->>Access: Outcome
     Access-->>Entry: Outcome 또는 오류
     Entry-->>Model: 48 KiB/2000줄 이내 결과 또는 오류
-    Note over Access,OS: 인증·시험·실행 실패 시 논리적 철회 후 sudo -k 시도
+    Note over Access,OS: 인증·시험 실패 또는 실행 취소·시간 초과·전송 오류 시 철회, 완료된 비영 종료는 기존 허가 유지

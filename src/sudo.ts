@@ -287,8 +287,9 @@ export class SudoAccess {
 					...result,
 					cancelled: result.cancelled || ownSignal.aborted,
 				};
-				if (outcome.code !== 0 || outcome.cancelled || outcome.timedOut) {
-					// Cannot distinguish sudo denial from command failure: fail closed and revoke the cache.
+				// A completed nonzero exit may be a sudo denial or a command failure.
+				// Neither renews the grant; do not infer which from stderr or re-authenticate.
+				if (outcome.code === null || outcome.cancelled || outcome.timedOut) {
 					this.clear();
 					revoked = true;
 					try {

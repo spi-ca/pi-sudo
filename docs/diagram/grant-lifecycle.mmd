@@ -4,8 +4,8 @@ stateDiagram-v2
     Pending --> Locked: 인증 전 확인 거절 / 사전 조건 거부
     Pending --> Revoking: 인증·시험 실패 / lock / shutdown
     Pending --> Granted: -k, -v 또는 -A -v, -n true 성공 + generation 일치
-    Granted --> Granted: sudo_exec 성공 / 기한 연장 없음
-    Granted --> Revoking: 만료 감지 / lock / shutdown / 실행 실패·취소
+    Granted --> Granted: sudo_exec 완료 (0 또는 비영 종료) / 기한 연장 없음
+    Granted --> Revoking: 만료 감지 / lock / shutdown / 실행 취소·시간 초과·종료 코드 없음·전송 오류
     Revoking --> Locked: sudo -k 정리 완료 또는 실패
     Pending --> Poisoned: 직접 자식 종료 확인 불가
     Granted --> Poisoned: 직접 자식 종료 확인 불가
