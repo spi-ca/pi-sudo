@@ -275,6 +275,43 @@ test("cleanup failure preserves original auth error and execution result without
 	expect(c.access.remainingMs()).toBe(0);
 });
 
+test("auth phases report distinct outcomes without capturing credentials and remain locked", async () => {
+	for (const [response, expected] of [
+		[{ ...fail, stderr: "password required" }, "sudo -k failed; credential cache may remain valid (exit 1)"],
+		[{ ...ok, cancelled: true }, "sudo -k failed; credential cache may remain valid (cancelled)"],
+	] as const) {
+		const f = fixture([response]);
+		await expect(f.access.unlock(1, true)).rejects.toThrow(expected);
+		expect(f.calls).toHaveLength(1);
+	}
+	for (const [response, expected] of [
+		[{ ...fail, stderr: "secret" }, "sudo -v authentication exit 1"],
+		[{ ...ok, cancelled: true }, "sudo -v authentication cancelled"],
+		[{ ...ok, timedOut: true }, "sudo -v authentication timed out"],
+	] as const) {
+		const f = fixture([ok, response]);
+		await expect(f.access.unlock(1, true)).rejects.toThrow(expected);
+		expect(f.calls[1]).toMatchObject({ args: ["-v"], interactive: true });
+		expect(f.calls[1].onOutput).toBeUndefined();
+		expect(f.calls).toHaveLength(3);
+		expect(f.access.remainingMs()).toBe(0);
+	}
+	const askpass = fixture([ok, fail]);
+	await expect(askpass.access.unlock(1, true, () => "/trusted/helper")).rejects.toThrow("sudo -A -v authentication exit 1");
+	const probe = fixture([ok, ok, { ...fail, stderr: "sudo: a password is required\u001b[2J\r" + "x".repeat(1000) }]);
+	let diagnostic = "";
+	try { await probe.access.unlock(1, true); } catch (error) { diagnostic = String(error); }
+	expect(diagnostic).toContain("probe failed (exit 1): sudo: a password is required");
+	expect(diagnostic.length).toBeLessThanOrEqual(520);
+	expect(diagnostic).not.toContain("\u001b");
+	expect(probe.calls.at(-1)?.args).toEqual(["-k"]);
+	for (const response of [{ ...ok, cancelled: true }, { ...ok, timedOut: true }]) {
+		const f = fixture([ok, ok, response]);
+		await expect(f.access.unlock(1, true)).rejects.toThrow(response.cancelled ? "probe failed (cancelled)" : "probe failed (timed out)");
+		expect(f.access.remainingMs()).toBe(0);
+	}
+});
+
 test("180-minute grant keeps its fixed boundary; direct API rejects 181", async () => {
 	const f = fixture();
 	await f.access.unlock(180, true);

@@ -7,6 +7,21 @@ const EXEC_TIMEOUT_MS = 60_000;
 const INVALIDATE_TIMEOUT_MS = 5_000;
 const MAX_MINUTES = 180;
 
+// Only the fixed noninteractive true probe has captured diagnostic output.
+// Authentication owns the terminal/askpass directly; never capture its output.
+function probeFailure(result: Outcome): string {
+	const state = result.cancelled ? "cancelled" : result.timedOut ? "timed out" : `exit ${result.code}`;
+	const detail = result.stderr.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ").trim();
+	const summary = detail ? `: ${detail}` : "";
+	return `Noninteractive sudo execution probe failed (${state})${summary}`.slice(0, 512);
+}
+
+function authFailure(result: Outcome, askpass: boolean): string {
+	const phase = askpass ? "sudo -A -v" : "sudo -v";
+	const state = result.cancelled ? "cancelled" : result.timedOut ? "timed out" : `exit ${result.code}`;
+	return `${phase} authentication ${state}`;
+}
+
 export type Clock = {
 	now(): number;
 	wallNow?(): number;
@@ -134,13 +149,18 @@ export class SudoAccess {
 	}
 
 	private async invalidate(): Promise<void> {
-		const result = await this.invoke({
-			executable: this.sudo,
-			args: ["-k"],
-			timeoutMs: INVALIDATE_TIMEOUT_MS,
-		});
+		let result: Outcome;
+		try {
+			result = await this.invoke({
+				executable: this.sudo,
+				args: ["-k"],
+				timeoutMs: INVALIDATE_TIMEOUT_MS,
+			});
+		} catch (error) {
+			throw new Error(`sudo -k failed; credential cache may remain valid; ${String(error)}`);
+		}
 		if (result.code !== 0 || result.cancelled || result.timedOut)
-			throw new Error("sudo -k failed; credential cache may remain valid");
+			throw new Error(`sudo -k failed; credential cache may remain valid (${result.cancelled ? "cancelled" : result.timedOut ? "timed out" : `exit ${result.code}`})`);
 	}
 
 	async unlock(
@@ -167,35 +187,45 @@ export class SudoAccess {
 				if (signal.aborted) throw new Error("Unlock cancelled");
 				// Resolve and recheck immediately before sudo's authentication child starts.
 				const helper = askpass?.();
-				const auth = await this.invoke({
-					executable: this.sudo,
-					args: helper ? ["-A", "-v"] : ["-v"],
-					interactive: !helper,
-					askpass: helper,
-					timeoutMs: AUTH_TIMEOUT_MS,
-					signal,
-				});
+				let auth: Outcome;
+				try {
+					auth = await this.invoke({
+						executable: this.sudo,
+						args: helper ? ["-A", "-v"] : ["-v"],
+						interactive: !helper,
+						askpass: helper,
+						timeoutMs: AUTH_TIMEOUT_MS,
+						signal,
+					});
+				} catch (error) {
+					throw new Error(`${helper ? "sudo -A -v" : "sudo -v"} authentication transport failed: ${String(error)}`);
+				}
 				if (
 					auth.code !== 0 ||
 					auth.cancelled ||
 					auth.timedOut ||
 					signal.aborted
 				)
-					throw new Error("sudo authentication failed or cancelled");
+					throw new Error(signal.aborted ? "Unlock cancelled during sudo authentication" : authFailure(auth, Boolean(helper)));
 				// Verify the execution path (same process parent, noninteractive, real command), not just -v.
-				const probe = await this.invoke({
-					executable: this.sudo,
-					args: ["-n", "--", "/usr/bin/true"],
-					timeoutMs: INVALIDATE_TIMEOUT_MS,
-					signal,
-				});
+				let probe: Outcome;
+				try {
+					probe = await this.invoke({
+						executable: this.sudo,
+						args: ["-n", "--", "/usr/bin/true"],
+						timeoutMs: INVALIDATE_TIMEOUT_MS,
+						signal,
+					});
+				} catch (error) {
+					throw new Error(`Noninteractive sudo execution probe transport failed: ${String(error)}`);
+				}
 				if (
 					probe.code !== 0 ||
 					probe.cancelled ||
 					probe.timedOut ||
 					signal.aborted
 				)
-					throw new Error("Noninteractive sudo execution probe failed");
+					throw new Error(signal.aborted ? "Unlock cancelled during sudo execution probe" : probeFailure(probe));
 				if (generation !== this.generation)
 					throw new Error("Unlock was revoked");
 				// Start the fixed grant only after the real noninteractive probe succeeds.
