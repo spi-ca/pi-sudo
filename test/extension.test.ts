@@ -48,6 +48,7 @@ function fixture(
 		askpass?: () => string | undefined;
 		resolveAskpass?: (value: string | undefined) => string;
 		clock?: Clock;
+		waitForIdle?: () => Promise<void>;
 	} = {},
 ) {
 	const calls: Invocation[] = [];
@@ -97,6 +98,7 @@ function fixture(
 		cwd: "/tmp",
 		waitForIdle: async () => {
 			events.push("idle");
+			await options.waitForIdle?.();
 		},
 		ui: {
 			theme: {
@@ -441,7 +443,7 @@ test("NO remains available on a tiny screen without showing the disclosures", as
 	await f.command("unlock");
 	expect(f.approvalFrames[0].join(" ")).toContain("Resize / Esc");
 	expect(f.calls).toHaveLength(0);
-	expect(f.events).toEqual(["idle", "confirm"]);
+	expect(f.events).toEqual(["confirm"]);
 });
 
 test("a resize before numeric YES cannot confirm hidden consent", async () => {
@@ -464,7 +466,7 @@ test("oversized askpass disclosure is rejected rather than truncating warnings",
 	const f = fixture({ askpass: () => helper, resolveAskpass: () => helper });
 	await f.command("unlock");
 	expect(f.calls).toHaveLength(0);
-	expect(f.events).toEqual(["idle"]);
+	expect(f.events).toEqual([]);
 	expect(f.messages.at(-1)).toContain("disclosure cannot be shown intact");
 });
 
@@ -587,7 +589,7 @@ test("confirmation, TUI restore, current cwd, shutdown and idempotent cleanup", 
 	const f = fixture();
 	await f.command("unlock 1");
 	expect(f.warnings[0]).toContain("up to 1 minute?\n Authenticate in this terminal");
-	expect(f.events).toEqual(["idle", "confirm", "stop", "start"]);
+	expect(f.events).toEqual(["confirm", "idle", "stop", "start"]);
 	expect(f.calls.slice(0, 3).map((call) => call.args)).toEqual([
 		["-k"],
 		["-v"],
@@ -692,7 +694,7 @@ test("declined confirmation invokes no sudo", async () => {
 	const f = fixture({ confirm: async () => false });
 	await f.command("unlock");
 	expect(f.calls).toHaveLength(0);
-	expect(f.events).toEqual(["idle", "confirm"]);
+	expect(f.events).toEqual(["confirm"]);
 	await expect(f.exec()).rejects.toThrow("locked");
 });
 
@@ -718,6 +720,70 @@ test("late confirmation cannot unlock after lock or shutdown; concurrent unlock 
 	}
 });
 
+test("approval appears before idle; YES waits without authenticating, NO never waits", async () => {
+	for (const askpass of [false, true]) {
+		let releaseIdle!: () => void;
+		const f = fixture({ askpass: askpass ? () => "/trusted/helper" : undefined,
+			waitForIdle: () => new Promise(resolve => { releaseIdle = resolve; }) });
+		const pending = f.command("unlock");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(f.events).toEqual(["confirm", "idle"]);
+		expect(f.calls).toHaveLength(0);
+		releaseIdle();
+		await pending;
+		expect(f.calls.some(call => call.args[0] === (askpass ? "-A" : "-v"))).toBe(true);
+		await f.shutdown();
+	}
+	const no = fixture({ approvalKeys: ["1"], waitForIdle: () => { throw Error("idle must not be reached"); } });
+	await no.command("unlock");
+	expect(no.events).toEqual(["confirm"]);
+	expect(no.calls).toHaveLength(0);
+});
+
+test("lock or shutdown while waiting for idle releases ownership and cannot authenticate later", async () => {
+	for (const transition of ["lock", "shutdown"] as const) {
+		let releaseIdle!: () => void;
+		let waits = 0;
+		const f = fixture({ askpass: () => "/trusted/helper", waitForIdle: () => ++waits === 1
+			? new Promise(resolve => { releaseIdle = resolve; }) : Promise.resolve() });
+		const stale = f.command("unlock");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(f.events).toEqual(["confirm", "idle"]);
+		await (transition === "lock" ? f.command("lock") : f.shutdown());
+		await stale; // must settle even though waitForIdle is still outstanding
+		expect(f.calls.some(call => call.args.includes("-v"))).toBe(false);
+		if (transition === "lock") {
+			await f.command("unlock");
+			expect(f.calls.filter(call => call.args.includes("-v"))).toHaveLength(1);
+			releaseIdle();
+			await Promise.resolve();
+			expect(f.calls.filter(call => call.args.includes("-v"))).toHaveLength(1);
+			await f.shutdown();
+		} else {
+			releaseIdle();
+			await Promise.resolve();
+			expect(f.calls.some(call => call.args.includes("-v"))).toBe(false);
+		}
+	}
+});
+
+test("lock dismisses pending approval; late input cannot authorize the next attempt", async () => {
+	let release!: (approved: boolean) => void;
+	let count = 0;
+	const f = fixture({ confirm: () => ++count === 1 ? new Promise(resolve => { release = resolve; }) : Promise.resolve(true) });
+	const stale = f.command("unlock");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await f.command("lock");
+	await stale; // no need to wait for input on the revoked dialog
+	const current = f.command("unlock");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	// Old fixture input may resolve late, but it cannot authorize or clear the new attempt.
+	release(true);
+	await current;
+	expect(f.calls.filter(call => call.args[0] === "-v")).toHaveLength(1);
+	await f.shutdown();
+});
+
 test("auth failure and spawn failure restore TUI and leave access locked", async () => {
 	for (const throws of [false, true]) {
 		const f = fixture({
@@ -739,7 +805,7 @@ test("auth failure and spawn failure restore TUI and leave access locked", async
 test("stop failure attempts restoration and revokes without authentication", async () => {
 	const f = fixture({ stopFails: true });
 	await f.command("unlock");
-	expect(f.events).toEqual(["idle", "confirm", "stop", "start"]);
+	expect(f.events).toEqual(["confirm", "idle", "stop", "start"]);
 	expect(f.calls).toHaveLength(0);
 	expect(f.messages.at(-1)).toContain("stop failure");
 	await expect(f.exec()).rejects.toThrow("locked");
@@ -778,7 +844,7 @@ test("completed nonzero tool outcome remains a Pi tool error without revoking or
 test("configured askpass is automatic, stays in TUI, and uses only auth invocation", async () => {
 	const f = fixture({ askpass: () => "/trusted/helper" });
 	await f.command("unlock");
-	expect(f.events).toEqual(["idle", "confirm"]);
+	expect(f.events).toEqual(["confirm", "idle"]);
 	expect(f.calls.map((call) => call.args)).toEqual([
 		["-k"],
 		["-A", "-v"],
@@ -817,7 +883,7 @@ test("retained --askpass alias requires SUDO_ASKPASS without terminal fallback",
 
 		const configured = fixture({ askpass: () => "/trusted/helper" });
 		await configured.command(command);
-		expect(configured.events).toEqual(["idle", "confirm"]);
+		expect(configured.events).toEqual(["confirm", "idle"]);
 		expect(configured.warnings[0]).toContain("Authenticate with OS askpass (/trusted/helper)");
 		expect(configured.calls.map((call) => call.args)).toEqual([
 			["-k"], ["-A", "-v"], ["-n", "--", "/usr/bin/true"],
@@ -836,7 +902,7 @@ test("retained --askpass alias requires SUDO_ASKPASS without terminal fallback",
 	const normal = fixture();
 	await normal.command("unlock");
 	expect(normal.warnings[0]).toContain("Authenticate in this terminal");
-	expect(normal.events).toEqual(["idle", "confirm", "stop", "start"]);
+	expect(normal.events).toEqual(["confirm", "idle", "stop", "start"]);
 	expect(normal.calls[1]?.args).toEqual(["-v"]);
 });
 
@@ -1201,4 +1267,168 @@ test("shutdown clears lightning before waiting for cleanup", async () => {
 	release();
 	await closing;
 	expect(f.statuses.at(-1)?.color).toBe("clear");
+});
+
+test("reauth revokes before confirmation, keeps original window across confirmation and auth", async () => {
+	const clock = fakeClock();
+	let approve!: (value: boolean) => void;
+	let count = 0;
+	const f = fixture({ clock: clock.scheduler, confirm: () => ++count === 1 ? Promise.resolve(true) : new Promise(resolve => { approve = resolve; }),
+		run: async call => { if (count > 1 && call.args[0] === "-v") clock.advance(5_000); return ok; } });
+	await f.command("unlock 1");
+	clock.advance(10_000);
+	const pending = f.command("reauth");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	expect(f.warnings.at(-1)).toContain("Reauthenticate sudo_exec");
+	await expect(f.exec()).rejects.toThrow("locked");
+	await f.command("unlock");
+	expect(f.messages.at(-1)).toContain("pending");
+	clock.advance(10_000);
+	approve(true);
+	await pending;
+	expect(f.calls.filter(call => call.args[0] === "-v")).toHaveLength(2);
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 0:35");
+	clock.advance(35_000);
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await expect(f.exec()).rejects.toThrow("locked");
+});
+
+test("reauth NO skips idle; an expired YES waiting for idle cannot extend the original window", async () => {
+	const clock = fakeClock();
+	let releaseIdle!: () => void;
+	let waits = 0;
+	let approvals = 0;
+	const f = fixture({ clock: clock.scheduler,
+		confirm: async () => ++approvals !== 2,
+		waitForIdle: () => ++waits === 3 ? new Promise(resolve => { releaseIdle = resolve; }) : Promise.resolve() });
+	await f.command("unlock 1");
+	await f.command("reauth"); // NO: no idle wait
+	expect(waits).toBe(1);
+	await f.command("unlock 1");
+	const stale = f.command("reauth");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	expect(waits).toBe(3); // the second unlock waited; reauth is now waiting
+	clock.advance(60_000);
+	releaseIdle();
+	await stale;
+	expect(f.calls.filter(call => call.args[0] === "-v")).toHaveLength(2);
+	await expect(f.exec()).rejects.toThrow("locked");
+});
+
+test("lock and shutdown while reauth waits for idle clear pending without reviving its deadline", async () => {
+	for (const transition of ["lock", "shutdown"] as const) {
+		const clock = fakeClock();
+		let releaseIdle!: () => void;
+		let waits = 0;
+		const f = fixture({ clock: clock.scheduler, askpass: () => "/trusted/helper",
+			waitForIdle: () => ++waits === 2
+				? new Promise(resolve => { releaseIdle = resolve; }) : Promise.resolve() });
+		await f.command("unlock 1");
+		clock.advance(10_000);
+		const stale = f.command("reauth");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(f.events.slice(-2)).toEqual(["confirm", "idle"]);
+		expect(f.calls.filter(call => call.args[0] === "-A")).toHaveLength(1);
+		await expect(f.exec()).rejects.toThrow("locked");
+		await (transition === "lock" ? f.command("lock") : f.shutdown());
+		await stale; // the original waitForIdle has not settled
+		expect(f.calls.filter(call => call.args[0] === "-A")).toHaveLength(1);
+		expect(clock.count()).toBe(0);
+		await expect(f.exec()).rejects.toThrow("locked");
+		if (transition === "lock") {
+			await f.command("unlock 1"); // the revoked reauth no longer owns pending
+			expect(f.calls.filter(call => call.args[0] === "-A")).toHaveLength(2);
+			expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+		}
+		releaseIdle();
+		await Promise.resolve();
+		expect(f.calls.filter(call => call.args[0] === "-A")).toHaveLength(transition === "lock" ? 2 : 1);
+		if (transition === "lock") {
+			expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+			clock.advance(60_000);
+			await new Promise(resolve => setTimeout(resolve, 0));
+			await expect(f.exec()).rejects.toThrow("locked");
+			await f.shutdown();
+		} else {
+			clock.advance(60_000);
+			expect(clock.count()).toBe(0);
+			await expect(f.exec()).rejects.toThrow("locked");
+		}
+	}
+});
+
+test("reauth denial, lock and shutdown while confirmation pending never revive access", async () => {
+	for (const transition of ["deny", "lock", "shutdown"]) {
+		let approve!: (value: boolean) => void;
+		let count = 0;
+		const f = fixture({ confirm: () => ++count === 1 ? Promise.resolve(true) : new Promise(resolve => { approve = resolve; }) });
+		await f.command("unlock");
+		const pending = f.command("reauth");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		if (transition === "lock") await f.command("lock");
+		if (transition === "shutdown") await f.shutdown();
+		approve(transition !== "deny");
+		await pending;
+		await expect(f.exec()).rejects.toThrow("locked");
+		expect(f.calls.filter(call => call.args[0] === "-v")).toHaveLength(1);
+	}
+});
+
+test("reauth rejects locked, non-TUI and non-TTY without opening confirmation", async () => {
+	for (const options of [{}, { mode: "rpc" }, { tty: false }]) {
+		const f = fixture(options);
+		await f.command("reauth");
+		expect(f.calls).toHaveLength(0);
+		expect(f.warnings).toHaveLength(0);
+	}
+	let second = false;
+	const f = fixture({ askpass: () => "/trusted/helper", run: async call => call.args[0] === "-A" && second ? { ...ok, code: 1 } : ok });
+	await f.command("unlock");
+	second = true;
+	await f.command("reauth");
+	expect(f.events.filter(event => event === "stop")).toHaveLength(0);
+	expect(f.calls.filter(call => call.args[0] === "-A")).toHaveLength(2);
+	await expect(f.exec()).rejects.toThrow("locked");
+});
+
+test("reauth expiry during consent prevents auth, and late auth after shutdown cannot reopen", async () => {
+	const clock = fakeClock();
+	let approve!: (value: boolean) => void;
+	let confirmations = 0;
+	const expiring = fixture({ clock: clock.scheduler,
+		confirm: () => ++confirmations === 1 ? Promise.resolve(true) : new Promise(resolve => { approve = resolve; }) });
+	await expiring.command("unlock 1");
+	const waiting = expiring.command("reauth");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	clock.advance(60_000);
+	approve(true);
+	await waiting;
+	expect(expiring.calls.filter(call => call.args[0] === "-v")).toHaveLength(1);
+	await expect(expiring.exec()).rejects.toThrow("locked");
+
+	let release!: (outcome: Outcome) => void;
+	let auths = 0;
+	const racing = fixture({ askpass: () => "/trusted/helper", run: call => {
+		if (call.args[0] === "-A" && ++auths === 2) return new Promise(resolve => { release = resolve; });
+		return Promise.resolve(ok);
+	} });
+	await racing.command("unlock");
+	const pending = racing.command("reauth");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	const shutdown = racing.shutdown();
+	expect(racing.calls.at(-1)?.signal?.aborted).toBe(true);
+	release(ok);
+	await Promise.all([pending, shutdown]);
+	await expect(racing.exec()).rejects.toThrow("locked");
+});
+
+test("non-TTY reauth request revokes a live grant without confirmation or authentication", async () => {
+	const options = { tty: true };
+	const f = fixture(options);
+	await f.command("unlock");
+	options.tty = false;
+	await f.command("reauth");
+	expect(f.calls.filter(call => call.args[0] === "-v")).toHaveLength(1);
+	expect(f.calls.at(-1)?.args).toEqual(["-k"]);
+	await expect(f.exec()).rejects.toThrow("locked");
 });
