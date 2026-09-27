@@ -5,10 +5,10 @@ sequenceDiagram
     participant Access as SudoAccess
     participant Proc as runProcess
     participant OS as sudo / 정책
-    User->>Entry: /sudo unlock [1..15]
-    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, waitForIdle, epoch 확인, 모드 명시 후 confirm
+    User->>Entry: /sudo unlock [1..180]
+    Entry->>Entry: SUDO_ASKPASS 유무·도우미 검증, waitForIdle, epoch 확인, 모드 명시 후 NO 기본 선택 확인
     opt 터미널 모드
-        Entry->>Entry: TUI stop
+        Entry->>Entry: 일반 stop()으로 UI 아래 이동 / fullscreen stop(preserveScreen)으로 기록 출력 방지, 짧은 안내
     end
     opt SUDO_ASKPASS 설정 시 askpass 모드
         Entry->>Entry: 정규 도우미 재검사, TUI 유지
@@ -21,7 +21,7 @@ sequenceDiagram
     Access->>Proc: sudo -n -- /usr/bin/true
     Proc->>OS: 비대화형 실행 시험
     Access->>Access: generation 확인 후 기한 설정
-    Entry->>Entry: 터미널 모드 finally: TUI start
+    Entry->>Entry: 터미널 모드 finally: 일반 렌더 상태 재기준화 후 start (스크롤백 유지) / fullscreen start
     Entry-->>User: unlocked 또는 실패 알림
     Model->>Entry: sudo_exec (추가 사용자 승인 없음)
     Entry->>Access: exec(executable, args, cwd)

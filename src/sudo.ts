@@ -5,7 +5,7 @@ import type { Outcome, Runner } from "./process.js";
 const AUTH_TIMEOUT_MS = 120_000;
 const EXEC_TIMEOUT_MS = 60_000;
 const INVALIDATE_TIMEOUT_MS = 5_000;
-const MAX_MINUTES = 15;
+const MAX_MINUTES = 180;
 
 export type Clock = {
 	now(): number;
@@ -21,8 +21,8 @@ const clock: Clock = {
 };
 
 export function validMinutes(input: string): number {
-	if (!/^(?:[1-9]|1[0-5])$/.test(input))
-		throw new Error("Duration must be a whole number of minutes from 1 to 15");
+	if (!/^(?:[1-9]|[1-9][0-9]|1[0-7][0-9]|180)$/.test(input))
+		throw new Error("Duration must be a whole number of minutes from 1 to 180");
 	return Number(input);
 }
 
@@ -153,7 +153,7 @@ export class SudoAccess {
 				"Unlock requires interactive Pi TUI and a real terminal on stdin/stdout/stderr",
 			);
 		if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_MINUTES)
-			throw new Error("Duration must be 1–15 minutes");
+			throw new Error("Duration must be 1–180 minutes");
 		if (this.active || this.locking) throw new Error("Sudo is busy");
 		if (this.deadline !== undefined)
 			throw new Error("Already unlocked; lock first (no automatic renewal)");
