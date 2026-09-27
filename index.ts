@@ -1,7 +1,7 @@
 /** Pi adapter: user consent and terminal ownership live here; grant policy lives in SudoAccess. */
 import { Type } from "@earendil-works/pi-ai";
-import { Container, Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { KeyId } from "@earendil-works/pi-tui";
+import { Container, truncateToWidth } from "@earendil-works/pi-tui";
+import { createQuestionnaireComponent, normalizeQuestions, type QuestionnaireResult } from "pi-ask-user/ui";
 import type { TUI, TuiMainScreenRenderState } from "@earendil-works/pi-tui";
 import type {
 	ExtensionAPI,
@@ -14,104 +14,77 @@ import { SudoAccess, validMinutes, type Clock } from "./src/sudo.js";
 import { createCallRenderer, renderResult } from "./src/render.js";
 
 const approvalWarnings = [
-	"• Model may run ANY sudo-policy command without per-command approval; use sudo_exec, not bash.",
+	"• The model can run any sudo-policy command without asking again. Use sudo_exec, not bash.",
 	"• Untrusted text may influence the model.",
 	"• Lock cannot undo changes or guarantee root descendants stop.",
 	"• This terminal's sudo cache may be shared.",
 ];
 
 async function approveUnlock(ui: ExtensionUIContext, minutes: number, mode: string): Promise<boolean> {
-	return ui.custom<boolean>((tui, theme, keys, done) => {
-		let selection: 0 | 1 = 0;
-		let renderedWidth = 0;
-		let renderedColumns = 0;
-		let renderedRows = 0;
-		let renderedConsent = false;
-		const lines = [
-			`Allow administrator commands for up to ${minutes} minute(s)?`,
-			`Authentication: ${mode}`,
-			...approvalWarnings,
-		];
-		const action = (data: string, name: Parameters<typeof keys.matches>[1], fallback: KeyId) =>
-			keys ? keys.matches(data, name) : matchesKey(data, fallback);
-		const label = (name: Parameters<typeof keys.getKeys>[0], fallback: string) => {
-			const binding = keys?.getKeys(name)?.[0];
-			if (!binding) return keys ? "Unbound" : fallback;
-			const names: Record<string, string> = { enter: "Enter", escape: "Esc", up: "↑", down: "↓" };
-			return binding.split("+").map((part) => names[part] ?? (part.length === 1 ? part.toUpperCase() :
-				part === "ctrl" ? "Ctrl" : part === "shift" ? "Shift" : part === "alt" ? "Alt" : part)).join("+");
-		};
-		const layout = (width: number) => {
-			// The host embeds custom() in its editor slot, not a full-height modal.
-			// Reserve room for the surrounding footer and refuse consent if any disclosure is hidden.
-			const columns = Math.min(Math.max(1, width), tui.terminal.columns ?? width);
-			const available = Math.max(0, (tui.terminal.rows ?? 0) - 5);
-			const full: string[] = [theme.fg("accent", "─".repeat(columns))];
-			for (const line of lines) {
-				for (const part of line.split("\n")) {
-					full.push(...wrapTextWithAnsi(part, columns));
-				}
+	const prompt = `Allow sudo_exec to run as administrator for up to ${minutes} ${minutes === 1 ? "minute" : "minutes"}?`;
+	const authentication = mode === "terminal" ? "Authenticate in this terminal" : `Authenticate with ${mode}`;
+	// The askpass path can be arbitrarily long. Reject, rather than let the
+	// questionnaire silently shorten a disclosure or drop a risk warning.
+	const disclosure = [prompt, authentication, ...approvalWarnings].join("\n");
+	const questions = normalizeQuestions({ questions: [{
+		id: "sudo", prompt: disclosure,
+		options: [{ value: "no", label: "NO (default)" }, { value: "yes", label: "YES" }],
+		defaultValues: ["no"], allowOther: false, optional: false,
+		multiSelect: false, requireReview: false,
+	}] });
+	if (typeof questions === "string" || questions.length !== 1 || questions[0]?.prompt !== disclosure ||
+		questions[0]?.id !== "sudo" || questions[0]?.options.length !== 2 ||
+		questions[0]?.options[0]?.value !== "no" || questions[0]?.options[0]?.label !== "NO (default)" ||
+		questions[0]?.options[1]?.value !== "yes" || questions[0]?.options[1]?.label !== "YES" ||
+		questions[0]?.defaultValues.length !== 1 || questions[0]?.defaultValues[0] !== "no" ||
+		questions[0]?.allowOther || questions[0]?.optional || questions[0]?.multiSelect || questions[0]?.requireReview)
+		throw new Error("Sudo consent disclosure cannot be shown intact");
+	const result = await ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
+		let shown: { width: number; columns: number; rows: number; lines: number } | undefined;
+		let component: ReturnType<typeof createQuestionnaireComponent>;
+		const fullFrame = (width: number) => component.render(width);
+		const fits = (width: number, lines: number) =>
+			width >= 32 && width === tui.terminal.columns &&
+			lines <= Math.max(0, tui.terminal.rows - 5);
+		const contains = (child: TUI["children"][number]): boolean =>
+			child === wrapper || (child instanceof Container && child.children.some(contains));
+		const canSubmit = (answer: QuestionnaireResult): boolean => {
+			const selected = answer.answers.find(item => item.id === "sudo");
+			if (selected?.kind === "single" && selected.value === "no") return true;
+			if (selected?.kind !== "single" || selected.value !== "yes") return false;
+			const width = tui.terminal.columns;
+			const lines = fullFrame(width).length;
+			if (shown && shown.width === width && shown.columns === width &&
+				shown.rows === tui.terminal.rows && shown.lines === lines && fits(width, lines)) {
+				// Pi 0.87.1 mounts the transcript first, then fixed dock components.
+				// Reserve every dock sibling at full height and one transcript row.
+				const owner = tui.children.find(contains);
+				const siblings = tui.children.slice(1).filter(child => child !== owner);
+				const available = tui.terminal.rows - 1 - siblings.reduce((rows, child) => rows + child.render(width).length, 0);
+				if (owner && owner !== tui.children[0] && lines <= available) return true;
 			}
-			full.push("", selection === 0 ? theme.fg("accent", "> 1. NO (default)") : "  1. NO (default)",
-				selection === 1 ? theme.fg("accent", "> 2. YES") : "  2. YES");
-			full.push(...wrapTextWithAnsi(theme.fg("dim", `${label("tui.select.up", "↑")}/${label("tui.select.down", "↓")} select · 1/2 move · ${label("tui.select.confirm", "Enter")} confirm · ${label("tui.select.cancel", "Esc")} cancel`), columns));
-			full.push(theme.fg("accent", "─".repeat(columns)));
-			// No page-through or invisible YES: the complete text and controls must fit.
-			const fits = columns >= 32 && full.length <= available;
-			const visible = fits ? full : [theme.fg("warning", "Resize / Esc to cancel")];
-			return { fits, lines: visible.map((line) => truncateToWidth(line, columns, "")) };
+			ui.notify("Sudo consent is clipped; enlarge the terminal or reduce widgets, then confirm again. Esc cancels.", "warning");
+			return false;
 		};
-		const component = {
+		component = createQuestionnaireComponent({ questions, tui, theme, keybindings, done, canSubmit });
+		const wrapper = {
+			get focused() { return component.focused; },
+			set focused(value: boolean) { component.focused = value; },
 			render(width: number) {
-				const frame = layout(width);
-				renderedWidth = width;
-				renderedColumns = tui.terminal.columns;
-				renderedRows = tui.terminal.rows;
-				renderedConsent = frame.fits;
-				return frame.lines;
+				const lines = fullFrame(width);
+				shown = fits(width, lines.length)
+					? { width, columns: tui.terminal.columns, rows: tui.terminal.rows, lines: lines.length }
+					: undefined;
+				return shown ? lines : [truncateToWidth(theme.fg("warning", "Resize / Esc to cancel"), Math.max(1, width), "")];
 			},
-			invalidate() {},
-			handleInput(data: string) {
-				const escape = matchesKey(data, Key.escape);
-				const escapeClaimed = action(data, "tui.select.confirm", "enter") ||
-					action(data, "tui.select.up", "up") || action(data, "tui.select.down", "down");
-				if (action(data, "tui.select.cancel", "escape") || (escape && !escapeClaimed)) { done(false); return; }
-				// Input batches can arrive after resize but before the scheduled render.
-				// A newly fitting layout is not consent the user has already seen.
-				if (!renderedConsent || renderedColumns !== tui.terminal.columns || renderedRows !== tui.terminal.rows) return;
-				const frame = layout(renderedWidth);
-				if (!frame.fits) return;
-				if (data === "1" || data === "2") selection = data === "1" ? 0 : 1;
-				else if (action(data, "tui.select.confirm", "enter")) {
-					if (selection === 1) {
-						// Pi 0.87.1 mounts the transcript first, then fixed dock components.
-						// Budget every dock sibling at its full height plus one transcript
-						// row: the fullscreen editor cannot shrink, and regular-mode
-						// widgets below it cannot push disclosures off-screen.
-						// tui.render() alone is intrinsic output, not proof of visibility.
-						const contains = (child: TUI["children"][number]): boolean =>
-							child === component || (child instanceof Container && child.children.some(contains));
-						const owner = tui.children.find(contains);
-						const width = tui.terminal.columns;
-						const current = layout(width);
-						const siblings = tui.children.slice(1).filter(child => child !== owner);
-						const available = tui.terminal.rows - 1 - siblings.reduce((rows, child) => rows + child.render(width).length, 0);
-						if (!owner || owner === tui.children[0] || !current.fits || current.lines.length > available) {
-							ui.notify("Sudo consent is clipped; enlarge the terminal or reduce widgets, then confirm again. Esc cancels.", "warning");
-							return;
-						}
-					}
-					done(selection === 1);
-					return;
-				}
-				else if (action(data, "tui.select.up", "up")) selection = 0;
-				else if (action(data, "tui.select.down", "down")) selection = 1;
-				else return;
-				tui.requestRender();
-			},
+			invalidate() { shown = undefined; component.invalidate(); },
+			handleInput(data: string) { component.handleInput(data); },
+			handleMouse(event: Parameters<typeof component.handleMouse>[0]) { return component.handleMouse(event); },
 		};
-		return component;
+		return wrapper;
 	});
+	return !result.cancelled && result.answers.some(answer =>
+		answer.id === "sudo" && answer.kind === "single" && answer.value === "yes");
 }
 
 // sudo inherits the real TTY. In regular mode, stop() moves below the footer;
@@ -145,7 +118,11 @@ function resumeTerminalAuth(tui: TUI): void {
 			cursorRow: 0, hardwareCursorRow: 0, maxLinesRendered: 0, previousViewportTop: 0,
 		});
 	}
-	tui.start(); // start schedules a render; forcing it clears regular scrollback.
+	tui.start();
+	// The host can request a render while authentication has TUI stopped.
+	// Pi 0.87.1 leaves that request pending, so start() alone may never schedule
+	// another frame. Flush without force: force would clear regular scrollback.
+	tui.renderNow();
 }
 
 function checkHost(): void {
@@ -191,7 +168,7 @@ export default function sudoExtension(
 		let color: "warning" | "error" = "warning";
 		if (remaining > 0) {
 			const seconds = Math.ceil(remaining / 1000);
-			label = `⚡ sudo grant ≤${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+			label = `⚡ sudo ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 			color = "warning";
 			refreshTimer = statusTimer.setTimeout(updateStatus, Math.min(1000, remaining));
 			refreshTimer.unref?.();
@@ -266,7 +243,7 @@ export default function sudoExtension(
 					const remaining = access.remainingMs();
 					ctx.ui.notify(
 						remaining
-							? `sudo_exec grant: up to ${Math.ceil(remaining / 1000)}s remaining; OS sudo credentials may expire sooner (ordinary bash is not elevated)`
+							? `sudo_exec: up to ${Math.ceil(remaining / 1000)}s left; OS sudo credentials may expire sooner (ordinary bash is not elevated)`
 							: "sudo locked",
 						"info",
 					);
@@ -369,7 +346,6 @@ export default function sudoExtension(
 											// A failed stop can leave input disabled; still attempt restoration.
 											attemptedStop = true;
 											terminalAuthHandoff(tui);
-											tui.terminal.write(`${tui.mode === "fullscreen" ? "\r\n" : ""}Authenticate with sudo in this terminal (not Pi).\r\n`);
 											if (cancelled) throw new Error("Unlock cancelled");
 											await authenticate();
 											if (cancelled) throw new Error("Unlock cancelled");
@@ -407,7 +383,7 @@ export default function sudoExtension(
 							cacheWarning = false;
 							updateStatus();
 							ctx.ui.notify(
-								"sudo_exec grant open (upper bound only; OS sudo credentials may expire sooner). Ordinary bash is not elevated; no automatic renewal",
+								"sudo_exec is ready. /sudo status shows the remaining window; OS sudo credentials may expire sooner. /sudo lock ends access.",
 								"info",
 							);
 						}
@@ -432,7 +408,7 @@ export default function sudoExtension(
 		name: "sudo_exec",
 		label: "#",
 		description:
-			"Execute one absolute executable with argv under an explicitly user-unlocked sudo window. Use sudo_exec, not ordinary bash: the grant and OS cache are separate. No shell, no password parameters. 60s timeout; nonzero result revokes access.",
+			"Execute one absolute executable with argv under an explicitly user-unlocked sudo window. Use sudo_exec, not ordinary bash: the grant and OS cache are separate. No shell, no password parameters. 60s timeout; a completed nonzero exit is a tool error but does not revoke the grant; cancellation, timeout and transport failure do.",
 		parameters: Type.Object({
 			executable: Type.String({
 				description: "Absolute path to executable; never a shell command",

@@ -108,18 +108,34 @@ describe("sudo authorization state", () => {
 			expect(f.access.remainingMs()).toBe(0);
 		}
 	});
-	test("deadline fires lock, no renewal; nonzero execution revokes", async () => {
+	test("deadline fires lock; successful and nonzero executions do not renew", async () => {
 		const f = fixture([ok, ok, ok, fail]);
 		await f.access.unlock(1, true);
 		f.advance(30_000);
 		expect(f.access.remainingMs()).toBe(30_000);
 		expect((await f.access.exec("/usr/bin/id", [])).code).toBe(1);
-		expect(f.access.remainingMs()).toBe(0);
-		await f.access.unlock(1, true);
-		f.advance(60_001);
+		expect(f.access.remainingMs()).toBe(30_000);
+		expect((await f.access.exec("/usr/bin/id", [])).code).toBe(0);
+		expect(f.access.remainingMs()).toBe(30_000);
+		f.advance(30_001);
 		await tick();
 		expect(f.access.remainingMs()).toBe(0);
 		expect(f.calls.at(-1)?.args).toEqual(["-k"]);
+	});
+	test("null exit, cancellation, timeout and transport failures revoke and invalidate", async () => {
+		for (const response of [
+			{ ...ok, code: null },
+			{ ...ok, cancelled: true },
+			{ ...ok, timedOut: true },
+			new Error("transport failed"),
+		]) {
+			const f = fixture([ok, ok, ok, response]);
+			await f.access.unlock(1, true);
+			if (response instanceof Error) await expect(f.access.exec("/usr/bin/id", [])).rejects.toThrow("transport failed");
+			else expect(await f.access.exec("/usr/bin/id", [])).toMatchObject(response);
+			expect(f.access.remainingMs()).toBe(0);
+			expect(f.calls.map(call => call.args).at(-1)).toEqual(["-k"]);
+		}
 	});
 	test("concurrent exec rejected; lock cancels running child and blocks new unlock", async () => {
 		let release!: (result: Outcome) => void;
@@ -263,11 +279,11 @@ test("cleanup failure preserves original auth error and execution result without
 	const b = fixture([fail]);
 	await expect(b.access.unlock(1, true)).rejects.toThrow("sudo -k failed");
 	expect(b.calls).toHaveLength(1);
-	const c = fixture([ok, ok, ok, { ...fail, stderr: "original" }, fail]);
+	const c = fixture([ok, ok, ok, { ...fail, code: null, cancelled: true, stderr: "original" }, fail]);
 	await c.access.unlock(1, true);
 	const result = await c.access.exec("/usr/bin/id", []);
 	expect(result).toMatchObject({
-		code: 1,
+		code: null,
 		stderr: "original",
 		cleanupWarning: expect.stringContaining("cleanup failed"),
 	});

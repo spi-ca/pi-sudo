@@ -38,7 +38,7 @@ flowchart TB
 | `src/askpass.ts` | 실경로 도우미와 상위 디렉터리 신뢰 검사 | GUI 실행·sudo 정책 |
 | `src/render.ts` | 도구 카드의 `#` 호출 제목·경과 시간·출력 미리보기; Pi가 제공하는 진행·성공·오류 배경 사용 | sudo 허가 판정·도구 이름 변경 |
 | `src/output.ts` | UTF-8 최종 모델 출력 제한 | 인증 출력 저장 |
-| `src/sudo.ts` | 입력 유효성 검사, 인증/시험/실행/철회 상태, 기한·동시성·실패 폐쇄 | TUI 소유, 자식 프로세스 생성 세부 사항 |
+| `src/sudo.ts` | 입력 유효성 검사, 인증/시험/실행/철회 상태, 기한·동시성·취소 등 실패 폐쇄 | TUI 소유, 자식 프로세스 생성 세부 사항 |
 | `src/process.ts` | `/usr/bin/sudo` 파일 검사, `spawn`·타임아웃·신호·제한된 출력 수집 | sudo 정책 결정, 후손 종료 보장 |
 | `test/extension.test.ts` | Pi 진입점 등록과 TUI·shutdown·tool 경계 | 실제 터미널 인증 |
 | `test/sudo.test.ts` | 가짜 clock/runner로 인증 순서·기한·경합·poison 검증 | OS sudo cache 실제 동작 |
@@ -48,7 +48,7 @@ flowchart TB
 
 ## 인증과 실행
 
-정상 인증과 실행 경로입니다. 인증 시작 뒤 실패한 경로는 접근 철회와 캐시 무효화 시도로 끝납니다. 정본: [`auth-exec.mmd`](diagram/auth-exec.mmd).
+정상 인증과 실행 경로입니다. 인증 시작 뒤 인증·시험 오류 또는 실행 취소·시간 초과·전송 오류는 접근 철회와 캐시 무효화 시도로 끝납니다. 완료된 명령의 비영 종료는 기존 허가를 유지합니다. 정본: [`auth-exec.mmd`](diagram/auth-exec.mmd).
 
 <!-- diagram:auth-exec:start -->
 
@@ -94,7 +94,7 @@ sequenceDiagram
     Proc-->>Access: Outcome
     Access-->>Entry: Outcome 또는 오류
     Entry-->>Model: 48 KiB/2000줄 이내 결과 또는 오류
-    Note over Access,OS: 인증·시험·실행 실패 시 논리적 철회 후 sudo -k 시도
+    Note over Access,OS: 인증·시험 실패 또는 실행 취소·시간 초과·전송 오류 시 철회, 완료된 비영 종료는 기존 허가 유지
 ```
 
 </details>
@@ -125,8 +125,8 @@ stateDiagram-v2
     Pending --> Locked: 인증 전 확인 거절 / 사전 조건 거부
     Pending --> Revoking: 인증·시험 실패 / lock / shutdown
     Pending --> Granted: -k, -v 또는 -A -v, -n true 성공 + generation 일치
-    Granted --> Granted: sudo_exec 성공 / 기한 연장 없음
-    Granted --> Revoking: 만료 감지 / lock / shutdown / 실행 실패·취소
+    Granted --> Granted: sudo_exec 완료 (0 또는 비영 종료) / 기한 연장 없음
+    Granted --> Revoking: 만료 감지 / lock / shutdown / 실행 취소·시간 초과·종료 코드 없음·전송 오류
     Revoking --> Locked: sudo -k 정리 완료 또는 실패
     Pending --> Poisoned: 직접 자식 종료 확인 불가
     Granted --> Poisoned: 직접 자식 종료 확인 불가
@@ -145,4 +145,4 @@ stateDiagram-v2
 
 <!-- diagram:grant-lifecycle:end -->
 
-논리적 접근 철회(`clear`)는 비동기 `sudo -k` 완료보다 먼저 일어납니다. 실패·만료 뒤 새 도구 실행을 즉시 거부하기 위한 순서입니다. 단조 시간은 시계 후퇴로 인한 연장을 막고 벽시계 시간은 절전 뒤 다음 검사에서 만료를 감지합니다. 직접 자식의 `exit`와 파이프의 `close`는 별개 이벤트이며, 종료가 확인되지 않으면 `terminationUnconfirmed`로 해당 런타임을 poison 처리해 다시 열지 않습니다. 일반 잠금 뒤 새로 열려면 사용자에게 다시 확인과 인증을 요구하며 자동 연장은 없습니다. Poisoned 상태는 같은 런타임에서 재인증할 수 없고, 남은 프로세스를 확인한 뒤 Pi를 재시작해야 합니다.
+논리적 접근 철회(`clear`)는 비동기 `sudo -k` 완료보다 먼저 일어납니다. 취소·시간 초과·전송 오류·만료 뒤 새 도구 실행을 즉시 거부하기 위한 순서입니다. 완료된 명령의 비영 종료는 도구 오류이지만 기한을 변경하지 않습니다. 단조 시간은 시계 후퇴로 인한 연장을 막고 벽시계 시간은 절전 뒤 다음 검사에서 만료를 감지합니다. 직접 자식의 `exit`와 파이프의 `close`는 별개 이벤트이며, 종료가 확인되지 않으면 `terminationUnconfirmed`로 해당 런타임을 poison 처리해 다시 열지 않습니다. 일반 잠금 뒤 새로 열려면 사용자에게 다시 확인과 인증을 요구하며 자동 연장은 없습니다. Poisoned 상태는 같은 런타임에서 재인증할 수 없고, 남은 프로세스를 확인한 뒤 Pi를 재시작해야 합니다.
