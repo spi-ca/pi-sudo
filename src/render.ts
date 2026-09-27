@@ -66,6 +66,14 @@ function safeText(text: string): string {
 	);
 }
 
+// Normalize display-only line endings before escaping controls; argv and model text stay raw.
+function outputLines(text: string): string[] {
+	const normalized = safeText(text.replace(/\r\n?/g, "\n"));
+	const lines = normalized.split("\n");
+	while (lines.at(-1) === "") lines.pop();
+	return lines;
+}
+
 function argument(value: string): string {
 	return /^[a-zA-Z0-9_./:=+,@%-]+$/.test(value)
 		? value
@@ -251,7 +259,7 @@ export function renderResult(
 			? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")]
 			: [];
 		return display([theme.fg("warning", "Running…"), ...(text ? [""] : [])],
-			text ? safeText(text).split("\n").map((line) => theme.fg("toolOutput", line)) : [],
+			text ? outputLines(text).map((line) => theme.fg("toolOutput", line)) : [],
 			footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
 	}
 	const details = result.details && typeof result.details === "object" ? result.details as ResultDetails : undefined;
@@ -278,9 +286,11 @@ export function renderResult(
 	const header = [theme.fg(color, status)];
 	// Thrown errors carry no structured provenance. Keep the original header as
 	// diagnostic evidence even when its exact format supplies a status summary.
-	if (context.isError && !details && matched) header.push(theme.fg("muted", safeText(matched[0].trimEnd())));
+	if (context.isError && matched && details?.code === undefined && details?.cancelled === undefined &&
+		details?.timedOut === undefined && details?.truncated === undefined)
+		header.push(theme.fg("muted", safeText(matched[0].trimEnd())));
 	if (cleanup) header.push(theme.fg("warning", CLEANUP_WARNING));
 	const footers = parsed.truncated || details?.displayTruncated ? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")] : [];
 	if (details?.displayOutput !== undefined) body = details.displayOutput;
-	return display(body ? [...header, ""] : header, body ? safeText(body).split("\n").map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
+	return display(body ? [...header, ""] : header, body ? outputLines(body).map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
 }

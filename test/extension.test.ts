@@ -6,10 +6,11 @@ import type {
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
-import type { Invocation, Outcome, Runner } from "../src/process.js";
+import { runProcess, type Invocation, type Outcome, type Runner } from "../src/process.js";
 import type { Clock } from "../src/sudo.js";
-import { CURSOR_MARKER, TuiMainScreen, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, CURSOR_MARKER, TuiMainScreen, TuiAltScreen, getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import type { Terminal, TUI } from "@earendil-works/pi-tui";
+import { createChatViewport } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/chat-viewport.js";
 
 
 const ok: Outcome = {
@@ -31,6 +32,15 @@ function fixture(
 		tui?: TUI;
 		missingHandoff?: boolean;
 		stopFails?: boolean;
+		columns?: number;
+		rows?: number;
+		inspectApproval?: boolean;
+		resizeApproval?: { columns: number; rows: number }[];
+		resizeBeforeInput?: { columns: number; rows: number };
+		bindings?: Record<string, string[]>;
+		realBindings?: boolean;
+		dockFooterRows?: number;
+		belowWidgetRows?: number;
 		host?: () => void;
 		askpass?: () => string | undefined;
 		resolveAskpass?: (value: string | undefined) => string;
@@ -42,6 +52,7 @@ function fixture(
 	const messages: string[] = [];
 	const warnings: string[] = [];
 	const approvalScreens: string[][] = [];
+	const approvalFrames: string[][] = [];
 	const statuses: { color: string; text: string }[] = [];
 	const boldLabels: string[] = [];
 	let command!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
@@ -100,7 +111,8 @@ function fixture(
 				const result = new Promise<unknown>((done) => { resolve = done; });
 				const tui = options.tui ?? {
 					mode: "regular",
-					terminal: { write: (_data: string) => {} },
+					children: [new Container()],
+					terminal: { write: (_data: string) => {}, columns: options.columns ?? 80, rows: options.rows ?? 24 },
 					...options.missingHandoff ? {} : {
 						captureRenderState: () => ({ previousLines: [], previousWidth: 0, previousHeight: 0,
 							cursorRow: 0, hardwareCursorRow: 0, maxLinesRendered: 0, previousViewportTop: 0 }),
@@ -117,23 +129,53 @@ function fixture(
 					},
 					requestRender: () => {},
 				};
-				const component = factory(
-					tui, { fg: (_color: string, text: string) => text }, {}, resolve,
-				) as { render: (width: number) => string[]; handleInput?: (key: string) => void };
+				const bindings = options.bindings ?? {};
+				const defaults: Record<string, string[]> = { "tui.select.up": ["up"], "tui.select.down": ["down"],
+					"tui.select.confirm": ["enter"], "tui.select.cancel": ["escape", "ctrl+c"] };
+				const raw: Record<string, string> = { up: "\u001b[A", down: "\u001b[B", enter: "\r", escape: "\u001b", "ctrl+c": "\u0003", "ctrl+y": "\u0019", "ctrl+j": "\n", "2": "2" };
+				const keybindings = {
+					getKeys: (name: string) => bindings[name] ?? defaults[name] ?? [],
+					matches: (data: string, name: string) => (bindings[name] ?? defaults[name] ?? []).some(key => raw[key] === data),
+				};
+				const component = factory(tui, { fg: (_color: string, text: string) => text }, options.realBindings ? getKeybindings() : keybindings, resolve,
+				) as { render: (width: number) => string[]; invalidate: () => void; handleInput?: (key: string) => void };
 				if (component.handleInput) {
+					// The real Pi host mounts custom() in its editor container before dispatching input.
+					if (options.tui && options.dockFooterRows !== undefined) {
+						const document = new Container();
+						document.addChild({ render: () => Array(40).fill("transcript"), invalidate() {} });
+						const editor = new Container();
+						editor.addChild(component);
+						const footer = new Container();
+						footer.addChild({ render: () => Array(options.dockFooterRows).fill("footer"), invalidate() {} });
+						const pendingMessages = new Container(), status = new Container();
+						const widgetsAbove = new Container(), widgetsBelow = new Container();
+						widgetsBelow.addChild({ render: () => Array(options.belowWidgetRows ?? 0).fill("widget"), invalidate() {} });
+						// Match InteractiveMode.mountInteractiveTui and its fullscreen root.
+						for (const child of [document, pendingMessages, status, widgetsAbove, editor, widgetsBelow, footer])
+							options.tui.addChild(child);
+						if (options.tui instanceof TuiAltScreen) options.tui.setLayoutRoot(createChatViewport({ document, editor, footer,
+							pendingMessages, status, widgetsAbove, widgetsBelow }).root);
+					} else if (options.tui) options.tui.addChild(component);
+					else tui.children.push(component as any);
 					events.push("confirm");
-					const warning = component.render(250).join("\n");
+					const sizes = [{ columns: tui.terminal.columns, rows: tui.terminal.rows }, ...options.resizeApproval ?? []];
+					for (const size of sizes) {
+						Object.assign(tui.terminal, size);
+						options.tui?.renderNow();
+						approvalFrames.push(component.render(size.columns));
+					}
+					const warning = approvalFrames.at(-1)!.join("\n");
 					warnings.push(warning);
 					approvalScreens.push(component.render(20));
-					expect(warning).toMatch(/Duration: up to \d+ minute\(s\)\. Mode: (terminal|OS askpass \([^\n]+\))\./);
-					for (const sentence of ["ANY command allowed by your sudo policy without per-command approval", "Use sudo_exec, not ordinary bash", "Untrusted project text can influence the model", "Lock cannot undo changes or guarantee stopping root descendants", "The sudo cache may be shared with this terminal", "Continue?", "1. NO (default)", "2. YES"])
-						expect(warning).toContain(sentence);
-					expect(warning.match(/^• /gm)).toHaveLength(4);
+					component.render(tui.terminal.columns);
+					if (options.resizeBeforeInput) Object.assign(tui.terminal, options.resizeBeforeInput);
 					void (async () => {
 						const keys = options.approvalKeys ?? [(options.confirm ? await options.confirm() : true) ? "2" : "1", "\r"];
 						for (const key of keys) component.handleInput!(key);
 					})();
 				}
+
 				return result;
 			},
 		},
@@ -144,6 +186,7 @@ function fixture(
 		messages,
 		warnings,
 		approvalScreens,
+		approvalFrames,
 		statuses,
 		boldLabels,
 		startup: () => startup({ type: "session_start" }, ctx),
@@ -184,6 +227,7 @@ test("real regular/fullscreen TUI handoff keeps regular scrollback and fullscree
 	for (const mode of ["regular", "fullscreen"] as const) {
 		for (const outcome of ["success", "failure", "cancel"] as const) {
 			const terminal = new RecordingTerminal();
+			terminal.rows = 24;
 			const tui = mode === "regular" ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
 			tui.addChild({ render: () => ["TRANSCRIPT-CANARY", `EDITOR${CURSOR_MARKER}`, "FOOTER-CANARY"], invalidate() {} });
 			tui.start();
@@ -215,9 +259,9 @@ test("real regular/fullscreen TUI handoff keeps regular scrollback and fullscree
 				expect(handoff).toContain("\x1b[?1049l");
 				expect(handoff).not.toContain("TRANSCRIPT-CANARY");
 			}
-			if (outcome === "success") expect(f.messages.at(-1)).toContain("unlocked");
+			if (outcome === "success") expect(f.messages.at(-1)).toContain("grant open");
 			else {
-				expect(f.messages.at(-1)).not.toContain("unlocked");
+				expect(f.messages.at(-1)).not.toContain("grant open");
 				await expect(f.exec()).rejects.toThrow("locked");
 			}
 			await f.shutdown();
@@ -226,12 +270,190 @@ test("real regular/fullscreen TUI handoff keeps regular scrollback and fullscree
 	}
 });
 
+test("OS SIGINT to Pi during non-detached auth cancels the child, restores TUI and removes handler", async () => {
+	const listeners = process.listenerCount("SIGINT");
+	let childResult: Outcome | undefined;
+	const f = fixture({ run: async (call) => {
+		if (call.args[0] !== "-v") return ok;
+		const child = runProcess({ ...call, executable: process.execPath,
+			args: ["-e", "setTimeout(() => {}, 5000)"], timeoutMs: 3000 });
+		setTimeout(() => process.kill(process.pid, "SIGINT"), 70);
+		childResult = await child;
+		return childResult;
+	} });
+	try {
+		await f.command("unlock");
+		expect(childResult?.cancelled).toBe(true);
+		expect(f.calls.map(call => call.args)).toContainEqual(["-v"]);
+		expect(f.events.at(-1)).toBe("start");
+		expect(f.messages.at(-1)).not.toContain("grant open");
+		await expect(f.exec()).rejects.toThrow("locked");
+		await f.command("status");
+		expect(f.messages.at(-1)).toBe("sudo locked");
+	} finally {
+		expect(process.listenerCount("SIGINT")).toBe(listeners);
+	}
+});
+
+test("SIGINT in initial invalidation or probe also fails closed and removes handler", async () => {
+	for (const stage of ["-k", "-n"]) {
+		const before = process.listenerCount("SIGINT");
+		let sent = false;
+		const f = fixture({ run: async (call) => {
+			if (call.args[0] === stage && !sent) {
+				sent = true;
+				await new Promise<void>(resolve => setTimeout(() => { process.emit("SIGINT"); resolve(); }, 0));
+			}
+			return ok;
+		} });
+		await f.command("unlock");
+		expect(f.events.at(-1)).toBe("start");
+		expect(f.messages.at(-1)).not.toContain("grant open");
+		await expect(f.exec()).rejects.toThrow("locked");
+		expect(process.listenerCount("SIGINT")).toBe(before);
+	}
+});
+
+test("inline consent fits real regular/fullscreen editor slots or fails closed after resize", async () => {
+	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+		const terminal = new RecordingTerminal();
+		terminal.columns = 80;
+		terminal.rows = 24;
+		const tui = new Screen(terminal);
+		tui.addChild({ render: () => ["transcript"], invalidate() {} });
+		tui.start();
+		try {
+			const f = fixture({ tui, resizeApproval: [{ columns: 30, rows: 10 }, { columns: 80, rows: 24 }], approvalKeys: ["\u001b"] });
+			await f.command("unlock");
+			expect(f.approvalFrames[0].join(" ")).toContain("2. YES");
+			expect(f.approvalFrames[1].join(" ")).toContain("Resize / Esc");
+			for (const [i, size] of [{ columns: 80, rows: 24 }, { columns: 30, rows: 10 }, { columns: 80, rows: 24 }].entries()) {
+				expect(f.approvalFrames[i].length).toBeLessThanOrEqual(size.rows - 5);
+				expect(f.approvalFrames[i].every(line => visibleWidth(line) <= size.columns)).toBe(true);
+			}
+			expect(f.calls).toHaveLength(0);
+		} finally { tui.stop({ preserveScreen: true }); }
+	}
+});
+
+test("resize followed by batched YES and Enter cannot approve before new consent renders", async () => {
+	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+		for (const initialRows of [10, 24]) {
+			const terminal = new RecordingTerminal();
+			terminal.rows = initialRows;
+			const tui = new Screen(terminal);
+			tui.addChild({ render: () => ["transcript"], invalidate() {} });
+			tui.start();
+			try {
+				const f = fixture({ tui, resizeBeforeInput: { columns: 80, rows: 30 },
+					approvalKeys: ["2", "\r", "\u001b"] });
+				await f.command("unlock");
+				expect(f.calls).toHaveLength(0);
+			} finally { tui.stop({ preserveScreen: true }); }
+		}
+	}
+});
+
+test("long helper wraps entirely in a tall editor without hiding warnings or choices", async () => {
+	const helper = `/trusted/${"long-helper-".repeat(10)}`;
+	const f = fixture({ columns: 48, rows: 38, askpass: () => helper, resolveAskpass: () => helper,
+		approvalKeys: ["\u001b"] });
+	await f.command("unlock");
+	const frame = f.approvalFrames[0];
+	expect(frame.length).toBeLessThanOrEqual(33);
+	expect(frame.every(line => visibleWidth(line) <= 48)).toBe(true);
+	expect(frame.join("\n")).toContain("2. YES");
+	expect(frame.join("\n").match(/• /g)).toHaveLength(4);
+	expect(f.calls).toHaveLength(0);
+});
+
+test("a resize after YES selection cannot confirm hidden consent", async () => {
+	const f = fixture({ resizeApproval: [{ columns: 32, rows: 8 }], approvalKeys: ["2", "\r", "\u001b"] });
+	await f.command("unlock");
+	expect(f.calls).toHaveLength(0);
+	expect(f.approvalFrames.at(-1)!.join(" ")).toContain("Resize / Esc");
+});
+
+test("unseen consent never approves, including long helper and resized narrow screen", async () => {
+	const f = fixture({ columns: 38, rows: 14, askpass: () => "/trusted/helper", resolveAskpass: () => "/trusted/" + "x".repeat(300),
+		approvalKeys: ["2", "\r", "\u001b"] });
+	await f.command("unlock");
+	expect(f.calls).toHaveLength(0);
+	expect(f.warnings[0]).toContain("Resize / Esc");
+});
+
+test("installed Pi select bindings confirm only after YES is selected", async () => {
+	const f = fixture({ realBindings: true, approvalKeys: ["2", "\r"] });
+	await f.command("unlock");
+	expect(f.calls[1]?.args).toEqual(["-v"]);
+});
+
+test("numeric shortcuts cannot become confirmation even when a select key is rebound", async () => {
+	const f = fixture({ bindings: { "tui.select.confirm": ["2"] }, approvalKeys: ["2", "\u001b"] });
+	await f.command("unlock");
+	expect(f.calls).toHaveLength(0);
+});
+
+test("real fullscreen dock admits visible consent but rejects consent clipped by a competing footer", async () => {
+	for (const footerRows of [2, 24]) {
+		const terminal = new RecordingTerminal();
+		terminal.rows = 24;
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		const f = fixture({ tui, dockFooterRows: footerRows, approvalKeys: ["2", "\r", "\u001b"] });
+		try {
+			await f.command("unlock");
+			if (footerRows === 2) expect(f.calls[1]?.args).toEqual(["-v"]);
+			else {
+				expect(f.calls).toHaveLength(0);
+				expect(f.messages.at(-1)).toContain("consent is clipped");
+			}
+		} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
+	}
+});
+
+test("below-editor widgets cannot push consent disclosures off-screen in either mode", async () => {
+	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+		for (const belowWidgetRows of [0, 12, 24]) {
+			const terminal = new RecordingTerminal();
+			terminal.rows = 24;
+			const tui = new Screen(terminal);
+			tui.start();
+			const f = fixture({ tui, dockFooterRows: 2, belowWidgetRows, approvalKeys: ["2", "\r", "\u001b"] });
+			try {
+				await f.command("unlock");
+				if (belowWidgetRows === 0) expect(f.calls[1]?.args).toEqual(["-v"]);
+				else {
+					expect(f.calls).toHaveLength(0);
+					expect(f.messages.at(-1)).toContain("consent is clipped");
+				}
+			} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
+		}
+	}
+});
+
+test("configured Pi select bindings are authoritative; digits only move selection", async () => {
+	const bindings = { "tui.select.confirm": ["ctrl+y"], "tui.select.cancel": ["ctrl+c"],
+		"tui.select.up": ["ctrl+j"], "tui.select.down": ["down"] };
+	for (const keys of [["2", "\r", "\u0003"], ["2", "\u001b"]]) {
+		const f = fixture({ bindings, approvalKeys: keys });
+		await f.command("unlock");
+		expect(f.calls).toHaveLength(0);
+		expect(f.warnings[0]).toContain("Ctrl+Y confirm");
+	}
+	const f = fixture({ bindings, approvalKeys: ["2", "\u0019"] });
+	await f.command("unlock");
+	expect(f.calls[1]?.args).toEqual(["-v"]);
+});
+
 test("missing regular render-state capability fails closed before sudo", async () => {
 	const f = fixture({ missingHandoff: true });
 	await f.command("unlock");
-	expect(f.calls.some(call => call.args[0] === "-v")).toBe(false);
+	expect(f.calls).toHaveLength(0);
 	expect(f.messages.at(-1)).toContain("safe terminal authentication handoff");
 	await expect(f.exec()).rejects.toThrow("locked");
+	await f.shutdown();
+	expect(f.calls).toHaveLength(0);
 });
 
 test("non-TUI and non-TTY unlock fail before any sudo; locked tools fail", async () => {
@@ -250,14 +472,14 @@ test("non-TUI and non-TTY unlock fail before any sudo; locked tools fail", async
 test("confirmation, TUI restore, current cwd, shutdown and idempotent cleanup", async () => {
 	const f = fixture();
 	await f.command("unlock 1");
-	expect(f.warnings[0]).toContain("Duration: up to 1 minute(s). Mode: terminal.");
+	expect(f.warnings[0]).toContain("up to 1 minute(s)?\nAuthentication: terminal");
 	expect(f.events).toEqual(["idle", "confirm", "stop", "start"]);
 	expect(f.calls.slice(0, 3).map((call) => call.args)).toEqual([
 		["-k"],
 		["-v"],
 		["-n", "--", "/usr/bin/true"],
 	]);
-	expect(f.messages.at(-1)).toContain("unlocked");
+	expect(f.messages.at(-1)).toContain("grant open");
 	const progress: unknown[] = [];
 	await f.exec(undefined, (update) => progress.push(update.content));
 	expect(progress).toEqual([[{ type: "text", text: "Checking access and running command…" }]]);
@@ -331,7 +553,7 @@ test("approval defaults NO, numeric selection requires Enter, arrows and cancel 
 		const f = fixture({ approvalKeys: keys });
 		await f.command("unlock 180");
 		expect(f.calls).toHaveLength(0);
-		expect(f.warnings[0]).toContain("Duration: up to 180 minute(s)");
+		expect(f.warnings[0]).toContain("up to 180 minute(s)");
 		expect(f.approvalScreens[0].every((line) => visibleWidth(line) <= 20)).toBe(true);
 	}
 	for (const keys of [["2", "\r"], ["\u001b[B", "\r"]]) {
@@ -477,7 +699,7 @@ test("retained --askpass alias requires SUDO_ASKPASS without terminal fallback",
 		const configured = fixture({ askpass: () => "/trusted/helper" });
 		await configured.command(command);
 		expect(configured.events).toEqual(["idle", "confirm"]);
-		expect(configured.warnings[0]).toContain("Mode: OS askpass (/trusted/helper).");
+		expect(configured.warnings[0]).toContain("Authentication: OS askpass (/trusted/helper)");
 		expect(configured.calls.map((call) => call.args)).toEqual([
 			["-k"], ["-A", "-v"], ["-n", "--", "/usr/bin/true"],
 		]);
@@ -494,7 +716,7 @@ test("retained --askpass alias requires SUDO_ASKPASS without terminal fallback",
 
 	const normal = fixture();
 	await normal.command("unlock");
-	expect(normal.warnings[0]).toContain("Mode: terminal.");
+	expect(normal.warnings[0]).toContain("Authentication: terminal");
 	expect(normal.events).toEqual(["idle", "confirm", "stop", "start"]);
 	expect(normal.calls[1]?.args).toEqual(["-v"]);
 });
@@ -526,7 +748,7 @@ test("askpass gating, refusal, recheck, failure and lock during authentication",
 		confirm: async () => false,
 	});
 	await refused.command("unlock 2");
-	expect(refused.warnings[0]).toContain("Duration: up to 2 minute(s). Mode: OS askpass (/trusted/helper).");
+	expect(refused.warnings[0]).toContain("up to 2 minute(s)?\nAuthentication: OS askpass (/trusted/helper)");
 	expect(refused.calls).toHaveLength(0);
 	let checks = 0;
 	const changed = fixture({
@@ -673,20 +895,18 @@ test("locked status stays hidden, pending is not a grant, duplicate unlock canno
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	release(true);
 	await unlock;
-	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo 1:00" });
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo grant ≤1:00" });
 	const count = f.calls.length;
-	const duplicate = f.command("unlock 1");
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
-	release(true);
-	await duplicate;
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+	await f.command("unlock 1");
+	expect(f.messages.at(-1)).toContain("Already unlocked");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo grant ≤1:00");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo grant ≤1:00");
 	expect(f.calls).toHaveLength(count);
 	clock.advance(29_000);
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 0:31");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo grant ≤0:31");
 	clock.advance(1_000);
-	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo 0:30" });
-	expect(f.boldLabels.at(-1)).toBe("⚡ sudo 0:30");
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo grant ≤0:30" });
+	expect(f.boldLabels.at(-1)).toBe("⚡ sudo grant ≤0:30");
 	expect(f.calls).toHaveLength(count);
 	await f.command("lock");
 	expect(f.statuses.at(-1)?.text).toBe("");
@@ -740,7 +960,7 @@ test("expiry stops lightning and failed expiry invalidation shows warning", asyn
 	clock.advance(60_000);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
-	expect(f.statuses.some(({ text }) => text === "⚡ sudo 0:00")).toBe(false);
+	expect(f.statuses.some(({ text }) => text === "⚡ sudo grant ≤0:00")).toBe(false);
 	expect(clock.count()).toBe(0);
 	await f.shutdown();
 });

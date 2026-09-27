@@ -90,6 +90,35 @@ test("ordered display metadata wins over model prefix on completion; thrown erro
 	expect(partial).not.toContain("model prefix");
 });
 
+test("output-only CRLF and progress carriage returns render as safe lines without wasting the tail row", () => {
+	const body = Array.from({ length: 9 }, (_, i) => `row ${i + 1}`).join("\r\n") + "\rprogress\r\n";
+	const final = show(body, undefined, false, false).join("\n");
+	expect(final).toContain("row 9\nprogress");
+	expect(final).not.toContain("\\u000d");
+	expect(final).not.toContain("... (1 more line");
+	const partial = renderResult(result("first\rnext\r\nlast\r\n", { streaming: true }),
+		{ isPartial: true, expanded: false }, theme, context).render(80).join("\n");
+	expect(partial).toContain("first\nnext\nlast");
+	expect(partial).not.toContain("\\u000d");
+	const eight = Array.from({ length: 8 }, (_, i) => `row ${i + 1}`).join("\r\n");
+	for (const ending of ["\n\n", "\r\n\r\n", "\r\r"]) {
+		const finalRows = show(eight + ending);
+		expect(finalRows.slice(-8)).toEqual(eight.split("\r\n"));
+		expect(finalRows.join("\n")).not.toContain("more line");
+		const partialRows = renderResult(result(eight + ending, { streaming: true }),
+			{ isPartial: true, expanded: false }, theme, context).render(80);
+		expect(partialRows.slice(-8)).toEqual(eight.split("\r\n"));
+	}
+	const control = show("abc\r\x1b[2J\u202e", undefined, true).join("\n");
+	expect(control).toContain("abc\n\\u001b[2J\\u202e");
+});
+
+test("Pi empty thrown details retain the status header as diagnostic evidence", () => {
+	const text = "Error: exit=7, cancelled=false, timedOut=false, truncated=false\nfailed";
+	expect(show(text, {}, false, true).join("\n")).toContain("Error · exit=7\nError: exit=7, cancelled=false, timedOut=false, truncated=false\n\nfailed");
+	expect(show(text, { code: 7, cancelled: false, timedOut: false, truncated: false }, false, true).join("\n")).not.toContain("Error: exit=7");
+});
+
 test("uses the current app.tools.expand key and restyles the whole notice", () => {
 	const manager = getKeybindings();
 	const original = manager.getKeys;
