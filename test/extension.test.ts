@@ -8,6 +8,8 @@ import type {
 import extension from "../index.js";
 import type { Invocation, Outcome, Runner } from "../src/process.js";
 import type { Clock } from "../src/sudo.js";
+import { CURSOR_MARKER, TuiMainScreen, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import type { Terminal, TUI } from "@earendil-works/pi-tui";
 
 
 const ok: Outcome = {
@@ -23,8 +25,12 @@ function fixture(
 		mode?: string;
 		tty?: boolean;
 		confirm?: () => Promise<boolean>;
+		approvalKeys?: string[];
 		run?: Runner;
 		restoreFails?: boolean;
+		tui?: TUI;
+		missingHandoff?: boolean;
+		stopFails?: boolean;
 		host?: () => void;
 		askpass?: () => string | undefined;
 		resolveAskpass?: (value: string | undefined) => string;
@@ -35,6 +41,7 @@ function fixture(
 	const events: string[] = [];
 	const messages: string[] = [];
 	const warnings: string[] = [];
+	const approvalScreens: string[][] = [];
 	const statuses: { color: string; text: string }[] = [];
 	const boldLabels: string[] = [];
 	let command!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
@@ -61,7 +68,7 @@ function fixture(
 		pi,
 		async (invocation) => {
 			calls.push(invocation);
-			if (invocation.args[0] === "-v") expect(events.at(-1)).toBe("stop");
+			if (invocation.args[0] === "-v" && !options.tui) expect(events.at(-1)).toBe("stop");
 			return options.run ? options.run(invocation) : ok;
 		},
 		() => options.tty ?? true,
@@ -82,23 +89,6 @@ function fixture(
 				fg: (color: string, text: string) => JSON.stringify({ color, text }),
 				bold: (text: string) => { boldLabels.push(text); return text; },
 			},
-			confirm: async (_title: string, warning: string) => {
-				warnings.push(warning);
-				expect(warning).toMatch(/^Duration: up to \d+ minute\(s\)\. Mode: (terminal|OS askpass \([^\n]+\))\.\n\n/);
-				for (const sentence of [
-					"ANY command allowed by your sudo policy without per-command approval",
-					"Use sudo_exec, not ordinary bash",
-					"Untrusted project text can influence the model",
-					"Lock cannot undo changes or guarantee stopping root descendants",
-					"The sudo cache may be shared with this terminal",
-					"Continue?",
-				]) expect(warning).toContain(sentence);
-				expect(warning.match(/^• /gm)).toHaveLength(4);
-				if (warning.includes("OS askpass"))
-					expect(warning).toContain("/trusted/helper");
-				events.push("confirm");
-				return options.confirm ? options.confirm() : true;
-			},
 			notify: (message: string) => {
 				messages.push(message);
 			},
@@ -107,22 +97,43 @@ function fixture(
 			},
 			custom: async (factory: (...args: any[]) => unknown) => {
 				let resolve!: (value: unknown) => void;
-				const result = new Promise<unknown>((done) => {
-					resolve = done;
-				});
-				factory(
-					{
-						stop: () => events.push("stop"),
-						start: () => {
-							events.push("start");
-							if (options.restoreFails) throw new Error("restore failure");
-						},
-						requestRender: () => {},
+				const result = new Promise<unknown>((done) => { resolve = done; });
+				const tui = options.tui ?? {
+					mode: "regular",
+					terminal: { write: (_data: string) => {} },
+					...options.missingHandoff ? {} : {
+						captureRenderState: () => ({ previousLines: [], previousWidth: 0, previousHeight: 0,
+							cursorRow: 0, hardwareCursorRow: 0, maxLinesRendered: 0, previousViewportTop: 0 }),
+						restoreRenderState: (_state: unknown) => {},
 					},
-					{},
-					{},
-					resolve,
-				);
+					stop: (args: unknown) => {
+						if (args !== undefined) throw new Error("regular stop must not preserve screen");
+						events.push("stop");
+						if (options.stopFails) throw new Error("stop failure");
+					},
+					start: () => {
+						events.push("start");
+						if (options.restoreFails) throw new Error("restore failure");
+					},
+					requestRender: () => {},
+				};
+				const component = factory(
+					tui, { fg: (_color: string, text: string) => text }, {}, resolve,
+				) as { render: (width: number) => string[]; handleInput?: (key: string) => void };
+				if (component.handleInput) {
+					events.push("confirm");
+					const warning = component.render(250).join("\n");
+					warnings.push(warning);
+					approvalScreens.push(component.render(20));
+					expect(warning).toMatch(/Duration: up to \d+ minute\(s\)\. Mode: (terminal|OS askpass \([^\n]+\))\./);
+					for (const sentence of ["ANY command allowed by your sudo policy without per-command approval", "Use sudo_exec, not ordinary bash", "Untrusted project text can influence the model", "Lock cannot undo changes or guarantee stopping root descendants", "The sudo cache may be shared with this terminal", "Continue?", "1. NO (default)", "2. YES"])
+						expect(warning).toContain(sentence);
+					expect(warning.match(/^• /gm)).toHaveLength(4);
+					void (async () => {
+						const keys = options.approvalKeys ?? [(options.confirm ? await options.confirm() : true) ? "2" : "1", "\r"];
+						for (const key of keys) component.handleInput!(key);
+					})();
+				}
 				return result;
 			},
 		},
@@ -132,6 +143,7 @@ function fixture(
 		events,
 		messages,
 		warnings,
+		approvalScreens,
 		statuses,
 		boldLabels,
 		startup: () => startup({ type: "session_start" }, ctx),
@@ -148,6 +160,79 @@ function fixture(
 		shutdown: () => shutdown({ type: "session_shutdown" }, ctx),
 	};
 }
+
+class RecordingTerminal implements Terminal {
+	writes: string[] = [];
+	columns = 80;
+	rows = 12;
+	kittyProtocolActive = false;
+	start() {}
+	stop() {}
+	drainInput = async () => {};
+	write(data: string) { this.writes.push(data); }
+	moveBy(_lines: number) {}
+	hideCursor() { this.write("\x1b[?25l"); }
+	showCursor() { this.write("\x1b[?25h"); }
+	clearLine() { this.write("\x1b[2K"); }
+	clearFromCursor() { this.write("\x1b[J"); }
+	clearScreen() { this.write("\x1b[2J"); }
+	setTitle(_title: string) {}
+	setProgress(_active: boolean) {}
+}
+
+test("real regular/fullscreen TUI handoff keeps regular scrollback and fullscreen transcript private", async () => {
+	for (const mode of ["regular", "fullscreen"] as const) {
+		for (const outcome of ["success", "failure", "cancel"] as const) {
+			const terminal = new RecordingTerminal();
+			const tui = mode === "regular" ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
+			tui.addChild({ render: () => ["TRANSCRIPT-CANARY", `EDITOR${CURSOR_MARKER}`, "FOOTER-CANARY"], invalidate() {} });
+			tui.start();
+			tui.renderNow();
+			terminal.writes = [];
+			const f = fixture({ tui, run: async (call) => {
+				if (call.args[0] === "-v") {
+					terminal.write("sudo output\r\n".repeat(30)); // scroll beyond the old UI coordinates
+					terminal.write("PARTIAL-PROMPT"); // a killed child need not finish its last line
+					return outcome === "success" ? ok : { ...ok, code: 1, cancelled: outcome === "cancel" };
+				}
+				return ok;
+			} });
+			await f.command("unlock");
+			tui.renderNow();
+			const output = terminal.writes.join("");
+			const notice = "Authenticate with sudo in this terminal (not Pi).";
+			const noticeAt = output.indexOf(notice);
+			expect(noticeAt).toBeGreaterThanOrEqual(0);
+			if (mode === "regular") {
+				// Public regular stop moves past the old footer before the static notice.
+				expect(output.slice(0, noticeAt)).toMatch(/\x1b\[\d+B\r\n/);
+				expect(output).not.toContain("\x1b[3J");
+				expect(output).not.toContain("\x1b[2J");
+				expect(output).toContain("PARTIAL-PROMPT\r\n");
+				expect(output.slice(noticeAt)).toContain("FOOTER-CANARY"); // one fresh redraw
+			} else {
+				const handoff = output.slice(0, noticeAt);
+				expect(handoff).toContain("\x1b[?1049l");
+				expect(handoff).not.toContain("TRANSCRIPT-CANARY");
+			}
+			if (outcome === "success") expect(f.messages.at(-1)).toContain("unlocked");
+			else {
+				expect(f.messages.at(-1)).not.toContain("unlocked");
+				await expect(f.exec()).rejects.toThrow("locked");
+			}
+			await f.shutdown();
+			tui.stop({ preserveScreen: true });
+		}
+	}
+});
+
+test("missing regular render-state capability fails closed before sudo", async () => {
+	const f = fixture({ missingHandoff: true });
+	await f.command("unlock");
+	expect(f.calls.some(call => call.args[0] === "-v")).toBe(false);
+	expect(f.messages.at(-1)).toContain("safe terminal authentication handoff");
+	await expect(f.exec()).rejects.toThrow("locked");
+});
 
 test("non-TUI and non-TTY unlock fail before any sudo; locked tools fail", async () => {
 	for (const options of [{ mode: "print" }, { mode: "rpc" }, { tty: false }]) {
@@ -241,6 +326,32 @@ test("thrown transport error keeps the last ordered streamed tail without detail
 	await f.shutdown();
 });
 
+test("approval defaults NO, numeric selection requires Enter, arrows and cancel fail closed", async () => {
+	for (const keys of [["\r"], ["2", "1", "\r"], ["\u001b[A", "\r"], ["\u001b"], ["\u0003"]]) {
+		const f = fixture({ approvalKeys: keys });
+		await f.command("unlock 180");
+		expect(f.calls).toHaveLength(0);
+		expect(f.warnings[0]).toContain("Duration: up to 180 minute(s)");
+		expect(f.approvalScreens[0].every((line) => visibleWidth(line) <= 20)).toBe(true);
+	}
+	for (const keys of [["2", "\r"], ["\u001b[B", "\r"]]) {
+		const f = fixture({ approvalKeys: keys });
+		await f.command("unlock 180");
+		expect(f.calls[1]?.args).toEqual(["-v"]);
+		await f.command("lock");
+	}
+});
+
+test("malformed duration rejects before approval or sudo", async () => {
+	for (const arg of ["0", "181", "01", "1.5", "+1", "180x", "Infinity"]) {
+		const f = fixture();
+		await f.command(`unlock ${arg}`);
+		expect(f.warnings).toHaveLength(0);
+		expect(f.calls).toHaveLength(0);
+		expect(f.messages.at(-1)).toContain("1 to 180");
+	}
+});
+
 test("declined confirmation invokes no sudo", async () => {
 	const f = fixture({ confirm: async () => false });
 	await f.command("unlock");
@@ -289,6 +400,15 @@ test("auth failure and spawn failure restore TUI and leave access locked", async
 	}
 });
 
+test("stop failure attempts restoration and revokes without authentication", async () => {
+	const f = fixture({ stopFails: true });
+	await f.command("unlock");
+	expect(f.events).toEqual(["idle", "confirm", "stop", "start"]);
+	expect(f.calls).toHaveLength(0);
+	expect(f.messages.at(-1)).toContain("stop failure");
+	await expect(f.exec()).rejects.toThrow("locked");
+});
+
 test("TUI restoration failure revokes successful authentication", async () => {
 	const f = fixture({ restoreFails: true });
 	await f.command("unlock");
@@ -334,6 +454,14 @@ test("configured askpass is automatic, stays in TUI, and uses only auth invocati
 	await defaultMode.command("unlock");
 	expect(defaultMode.calls[1].args).toEqual(["-v"]);
 	expect(defaultMode.calls[1].askpass).toBeUndefined();
+});
+
+test("askpass helper control characters are escaped in the approval screen", async () => {
+	const f = fixture({ askpass: () => "/trusted/helper\u001b[2J", resolveAskpass: (value) => value! });
+	await f.command("unlock 1");
+	expect(f.warnings[0]).toContain("/trusted/helper\\u001b[2J");
+	expect(f.warnings[0]).not.toContain("\u001b");
+	expect(f.calls[1]?.askpass).toBe("/trusted/helper\u001b[2J");
 });
 
 test("retained --askpass alias requires SUDO_ASKPASS without terminal fallback", async () => {

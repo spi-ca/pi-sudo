@@ -83,16 +83,18 @@ describe("sudo authorization state", () => {
 	test("no TUI, invalid duration, repeated unlock and invalid paths fail closed", async () => {
 		const f = fixture();
 		await expect(f.access.unlock(5, false)).rejects.toThrow("interactive");
-		await expect(f.access.unlock(16, true)).rejects.toThrow("Duration");
+		for (const invalid of [0, 181, 1.5, NaN, Infinity])
+			await expect(f.access.unlock(invalid, true)).rejects.toThrow("Duration");
 		expect(f.calls).toHaveLength(0);
 		await f.access.unlock(5, true);
 		await expect(f.access.unlock(5, true)).rejects.toThrow("Already unlocked");
 		await expect(f.access.exec("sh", [])).rejects.toThrow("absolute");
 		expect(() => validateExec("/bin/sh", ["x\0y"])).toThrow("NUL");
 		expect(() => validateExec("/bin/sh", [], "relative")).toThrow("absolute");
-		expect(validMinutes("15")).toBe(15);
-		expect(() => validMinutes("1.5")).toThrow();
-		expect(() => validMinutes("0")).toThrow();
+		for (const valid of ["1", "15", "180"])
+			expect(validMinutes(valid)).toBe(Number(valid));
+		for (const invalid of ["0", "181", "1.5", "01", "+1", " 1", "1x", "", "Infinity", "179.0"])
+			expect(() => validMinutes(invalid)).toThrow("1 to 180");
 	});
 	test("failed auth, failed probe, and spawn error invalidate and never unlock", async () => {
 		for (const responses of [
@@ -271,6 +273,18 @@ test("cleanup failure preserves original auth error and execution result without
 	});
 	expect(c.calls).toHaveLength(5);
 	expect(c.access.remainingMs()).toBe(0);
+});
+
+test("180-minute grant keeps its fixed boundary; direct API rejects 181", async () => {
+	const f = fixture();
+	await f.access.unlock(180, true);
+	f.advance(180 * 60_000 - 1);
+	expect(f.access.remainingMs()).toBe(1);
+	f.advance(1);
+	await tick();
+	expect(f.access.remainingMs()).toBe(0);
+	expect(f.calls.at(-1)?.args).toEqual(["-k"]);
+	await expect(f.access.unlock(181, true)).rejects.toThrow("1–180");
 });
 
 test("askpass auth-only invocation expires with no renewal", async () => {

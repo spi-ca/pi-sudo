@@ -11,7 +11,7 @@ bun test
 bun run docs:check
 ```
 
-별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 확인 UI·복원·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 기한·동시성·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
+별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 NO 기본 선택·숫자/화살표 확인 UI·실제 TuiMainScreen/TuiAltScreen 중지·재개와 스크롤백 보존·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 1~180분 기한·동시성·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
 
 ## GitHub Actions CI
 

@@ -1,5 +1,7 @@
 /** Pi adapter: user consent and terminal ownership live here; grant policy lives in SudoAccess. */
 import { Type } from "@earendil-works/pi-ai";
+import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { TUI, TuiMainScreenRenderState } from "@earendil-works/pi-tui";
 import type {
 	ExtensionAPI,
 	ExtensionUIContext,
@@ -9,6 +11,84 @@ import { boundedError, boundedText, formatOutcome } from "./src/output.js";
 import { runProcess, sudoPath, type Runner } from "./src/process.js";
 import { SudoAccess, validMinutes, type Clock } from "./src/sudo.js";
 import { createCallRenderer, renderResult } from "./src/render.js";
+
+const approvalWarnings = [
+	"• The model may run ANY command allowed by your sudo policy without per-command approval. Use sudo_exec, not ordinary bash.",
+	"• Untrusted project text can influence the model.",
+	"• Lock cannot undo changes or guarantee stopping root descendants.",
+	"• The sudo cache may be shared with this terminal.",
+];
+
+async function approveUnlock(ui: ExtensionUIContext, minutes: number, mode: string): Promise<boolean> {
+	return ui.custom<boolean>((tui, theme, _keys, done) => {
+		let selection: 0 | 1 = 0;
+		return {
+			render(width) {
+				const lines = [
+					"Temporarily allow administrator commands?",
+					`Duration: up to ${minutes} minute(s). Mode: ${mode}.`,
+					"",
+					...approvalWarnings,
+					"",
+					"Continue? (default: NO)",
+					selection === 0 ? theme.fg("warning", "> 1. NO (default)") : "  1. NO (default)",
+					selection === 1 ? theme.fg("warning", "> 2. YES") : "  2. YES",
+					"↑/↓ to select · 1/2 then Enter · Esc/Ctrl+C to cancel",
+				];
+				return lines.flatMap((line) => line ? wrapTextWithAnsi(line, Math.max(1, width)) : [""]);
+			},
+			invalidate() {},
+			handleInput(data) {
+				if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+					done(false);
+					return;
+				}
+				if (matchesKey(data, Key.enter)) {
+					done(selection === 1);
+					return;
+				}
+				if (matchesKey(data, Key.up)) selection = 0;
+				else if (matchesKey(data, Key.down)) selection = 1;
+				else if (matchesKey(data, "1")) selection = 0;
+				else if (matchesKey(data, "2")) selection = 1;
+				else return;
+				tui.requestRender();
+			},
+		};
+	});
+}
+
+// sudo inherits the real TTY. In regular mode, stop() moves below the footer;
+// after sudo writes, old differential-render coordinates cannot be trusted.
+function terminalAuthHandoff(tui: TUI): void {
+	if (tui.mode === "regular") {
+		if (typeof (tui as TUI & { captureRenderState?: unknown }).captureRenderState !== "function" ||
+			typeof (tui as TUI & { restoreRenderState?: unknown }).restoreRenderState !== "function")
+			throw new Error("Regular TUI does not support safe terminal authentication handoff");
+		tui.stop();
+	} else if (tui.mode === "fullscreen") {
+		tui.stop({ preserveScreen: true });
+	} else {
+		throw new Error("Unsupported TUI mode for terminal authentication");
+	}
+}
+
+function resumeTerminalAuth(tui: TUI): void {
+	if (tui.mode === "regular") {
+		const main = tui as TUI & {
+			captureRenderState(): TuiMainScreenRenderState;
+			restoreRenderState(state: TuiMainScreenRenderState): void;
+		};
+		// Cancellation can leave sudo's prompt mid-line. Re-anchor on a fresh line.
+		tui.terminal.write("\r\n");
+		main.restoreRenderState({
+			...main.captureRenderState(),
+			previousLines: [], previousWidth: 0, previousHeight: 0,
+			cursorRow: 0, hardwareCursorRow: 0, maxLinesRendered: 0, previousViewportTop: 0,
+		});
+	}
+	tui.start(); // start schedules a render; forcing it clears regular scrollback.
+}
 
 function checkHost(): void {
 	if (process.platform !== "linux" && process.platform !== "darwin")
@@ -119,7 +199,7 @@ export default function sudoExtension(
 
 	pi.registerCommand("sudo", {
 		description:
-			"Explicit sudo unlock [1–15 minutes], lock, or status (interactive terminal only)",
+			"Explicit sudo unlock [1–180 minutes], lock, or status (interactive terminal only)",
 		handler: async (raw, ctx) => {
 			if (!closed) ui = ctx.ui;
 			const parts = raw.trim().split(/\s+/);
@@ -177,18 +257,11 @@ export default function sudoExtension(
 						await ctx.waitForIdle();
 						if (epoch !== authorizationEpoch)
 							throw new Error("Unlock was revoked");
-						const approved = await ctx.ui.confirm(
-							"Temporarily allow administrator commands?",
-							[
-								`Duration: up to ${minutes} minute(s). Mode: ${helper ? `OS askpass (${helper})` : "terminal"}.`,
-								"",
-								"• The model may run ANY command allowed by your sudo policy without per-command approval. Use sudo_exec, not ordinary bash.",
-								"• Untrusted project text can influence the model.",
-								"• Lock cannot undo changes or guarantee stopping root descendants.",
-								"• The sudo cache may be shared with this terminal.",
-								"",
-								"Continue?",
-							].join("\n"),
+						const displayHelper = helper?.replace(/[\x00-\x1f\x7f-\x9f]/g, (char) =>
+							`\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+						);
+						const approved = await approveUnlock(
+							ctx.ui, minutes, displayHelper ? `OS askpass (${displayHelper})` : "terminal",
 						);
 						if (!approved) return;
 						if (epoch !== authorizationEpoch)
@@ -222,16 +295,18 @@ export default function sudoExtension(
 										let stopped = false;
 										let failure: unknown;
 										try {
-											tui.stop();
+											// A failed stop can leave input disabled; still attempt restoration.
 											stopped = true;
+											terminalAuthHandoff(tui);
+											// Regular stop leaves the cursor below the UI; fullscreen exits alt screen.
+											tui.terminal.write(`${tui.mode === "fullscreen" ? "\r\n" : ""}Authenticate with sudo in this terminal (not Pi).\r\n`);
 											await authenticate();
 										} catch (error) {
 											failure = error;
 										} finally {
 											try {
 												if (stopped) {
-													tui.start();
-													tui.requestRender(true);
+													resumeTerminalAuth(tui);
 												}
 											} catch (error) {
 												failure = failure
