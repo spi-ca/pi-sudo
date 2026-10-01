@@ -3,6 +3,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
+	ExtensionToolContext,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
@@ -96,6 +97,8 @@ function fixture(
 	const ctx = {
 		mode: options.mode ?? "tui",
 		cwd: "/tmp",
+		tools: [],
+		executeTool: async () => { throw new Error("sudo_exec must not orchestrate nested tools"); },
 		waitForIdle: async () => {
 			events.push("idle");
 			await options.waitForIdle?.();
@@ -197,7 +200,7 @@ function fixture(
 				return result;
 			},
 		},
-	} as unknown as ExtensionCommandContext;
+	} as unknown as ExtensionCommandContext & ExtensionToolContext;
 	return {
 		calls,
 		events,
@@ -209,6 +212,7 @@ function fixture(
 		boldLabels,
 		startup: () => startup({ type: "session_start" }, ctx),
 		command: (args: string) => command(args, ctx),
+		exposure: tool.exposure,
 		renderCall: tool.renderCall!,
 		exec: (signal?: AbortSignal, onUpdate?: Parameters<ToolDefinition["execute"]>[3], id = "id") =>
 			tool.execute(
@@ -221,6 +225,10 @@ function fixture(
 		shutdown: () => shutdown({ type: "session_shutdown" }, ctx),
 	};
 }
+
+test("sudo_exec is model-only and unavailable to nested tool callers", () => {
+	expect(fixture().exposure).toBe("model-only");
+});
 
 class RecordingTerminal implements Terminal {
 	writes: string[] = [];
