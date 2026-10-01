@@ -448,6 +448,7 @@ export default function sudoExtension(
 	pi.registerTool({
 		name: "sudo_exec",
 		label: "#",
+		exposure: "model-only",
 		description:
 			"Execute one absolute executable with argv under an explicitly user-unlocked sudo window. Use sudo_exec, not ordinary bash: the grant and OS cache are separate. No shell, no password parameters. 60s timeout; a completed nonzero exit is a tool error but does not revoke the grant; cancellation, timeout and transport failure do.",
 		parameters: Type.Object({
