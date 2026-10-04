@@ -525,19 +525,10 @@ export default function sudoExtension(
 				}
 				if (result.cleanupWarning) cacheWarning = true;
 				updateStatus();
-				if (result.code !== 0 || result.cancelled || result.timedOut) {
-					// Pi drops details for thrown tools. Use the ordered tail in the
-					// bounded error text so completed error cards retain the last output.
-					const failure = result.displayOutput === undefined ? result : {
-						...result,
-						stdout: result.displayOutput,
-						stderr: "",
-						truncated: result.truncated || result.displayTruncated === true,
-					};
-					throw new Error(formatOutcome(failure).text);
-				}
+				const isError = result.code !== 0 || result.cancelled || result.timedOut;
 				const { text, truncated } = formatOutcome(result);
 				return {
+					...(isError ? { isError: true } : {}),
 					content: [{ type: "text", text }],
 					details: {
 						code: result.code,

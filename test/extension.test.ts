@@ -636,7 +636,7 @@ test("only authorized execution forwards bounded partial output, without changin
 	await f.shutdown();
 });
 
-test("mixed pipes use ordered display metadata on success and bounded error text on failure", async () => {
+test("mixed pipes preserve model prefixes and ordered display metadata on success and failure", async () => {
 	let fail = false;
 	const f = fixture({ run: async (call) => {
 		if (call.args[2] !== "/usr/bin/id") return ok;
@@ -652,8 +652,13 @@ test("mixed pipes use ordered display metadata on success and bounded error text
 	expect(success).toMatchObject({ content: [{ text: "exit=0, cancelled=false, timedOut=false, truncated=false\nstdout prefix\nstderr prefix" }],
 		details: { displayOutput: "err-first\nout-last" } });
 	fail = true;
-	await expect(f.exec()).rejects.toThrow("exit=3, cancelled=false, timedOut=false, truncated=false\nerr-first\nout-last");
-	await expect(f.exec()).rejects.toThrow("exit=3");
+	expect(await f.exec()).toMatchObject({
+		isError: true,
+		content: [{ text: "exit=3, cancelled=false, timedOut=false, truncated=false\nstdout prefix\nstderr prefix" }],
+		details: { code: 3, cancelled: false, timedOut: false, truncated: false,
+			displayOutput: "err-first\nout-last", displayTruncated: false },
+	});
+	expect(await f.exec()).toMatchObject({ isError: true, details: { code: 3 } });
 	await f.shutdown();
 });
 
@@ -838,7 +843,10 @@ test("completed nonzero tool outcome remains a Pi tool error without revoking or
 	await f.command("unlock 1");
 	clock.advance(10_000);
 	const updates: unknown[] = [];
-	await expect(f.exec(undefined, update => updates.push(update))).rejects.toThrow("exit=2");
+	expect(await f.exec(undefined, update => updates.push(update))).toMatchObject({
+		isError: true, details: { code: 2, cancelled: false, timedOut: false },
+		content: [{ text: "exit=2, cancelled=false, timedOut=false, truncated=false\ndenied" }],
+	});
 	expect(updates).toHaveLength(2);
 	expect(updates[1]).toMatchObject({ content: [{ text: "denied" }] });
 	expect(f.calls.filter(call => call.args[0] === "-k")).toHaveLength(1);
@@ -1001,9 +1009,11 @@ test("cancelled tool error preserves command result and bounded cleanup warning"
 		},
 	});
 	await f.command("unlock");
-	await expect(f.exec()).rejects.toThrow(
-		/exit=null[\s\S]*cleanup failed[\s\S]*failure/,
-	);
+	const result = await f.exec();
+	expect(result).toMatchObject({ isError: true, details: { code: null, cancelled: true, timedOut: false } });
+	expect(result.content[0]).toMatchObject({ text: expect.stringMatching(/exit=null[\s\S]*cleanup failed[\s\S]*failure/) });
+	await expect(f.exec()).rejects.toThrow("locked");
+	await f.shutdown();
 });
 
 test("askpass failure and helper substitution never grant or fall back", async () => {
@@ -1134,7 +1144,10 @@ test("cache cleanup warning persists through status until successful lock", asyn
 	} });
 	f.startup();
 	await f.command("unlock 1");
-	await expect(f.exec()).rejects.toThrow("cleanup failed");
+	const result = await f.exec();
+	expect(result).toMatchObject({ isError: true, details: { code: null, timedOut: true } });
+	expect(result.content[0]).toMatchObject({ text: expect.stringContaining("cleanup failed") });
+	await expect(f.exec()).rejects.toThrow("locked");
 	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
 	await f.command("status");
 	expect(f.statuses.at(-1)?.text).toBe("⚠️ sudo");
@@ -1233,7 +1246,7 @@ test("print executions leave no spinner IDs; live cancellation and shutdown stop
 	controller.abort();
 	expect(live.renderCall({}, theme, context("id")).render(80)).toEqual(["# …"]);
 	release({ ...ok, cancelled: true });
-	await expect(executing).rejects.toThrow();
+	expect(await executing).toMatchObject({ isError: true, details: { cancelled: true } });
 	const before = ticks;
 	await Bun.sleep(550);
 	expect(ticks).toBe(before);
@@ -1439,4 +1452,30 @@ test("non-TTY reauth request revokes a live grant without confirmation or authen
 	expect(f.calls.filter(call => call.args[0] === "-v")).toHaveLength(1);
 	expect(f.calls.at(-1)?.args).toEqual(["-k"]);
 	await expect(f.exec()).rejects.toThrow("locked");
+});
+
+test("completed error outcomes retain bounded model text, details, and revoked admission where required", async () => {
+	for (const outcome of [
+		{ code: 7, cancelled: false, timedOut: false },
+		{ code: null, cancelled: false, timedOut: false },
+		{ code: 0, cancelled: true, timedOut: false },
+		{ code: 0, cancelled: false, timedOut: true },
+	]) {
+		const f = fixture({ run: async call => call.args[2] === "/usr/bin/id"
+			? { ...ok, ...outcome, stdout: "한글\n".repeat(20_000), stderr: "late stderr",
+				displayOutput: "arrival-ordered tail", displayTruncated: true }
+			: ok });
+		await f.command("unlock");
+		const result = await f.exec();
+		expect(result).toMatchObject({ isError: true, details: { ...outcome,
+			truncated: true, displayOutput: "arrival-ordered tail", displayTruncated: true } });
+		const text = (result.content[0] as { text: string }).text;
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(48 * 1024);
+		expect(text.split("\n").length).toBeLessThanOrEqual(2000);
+		expect(text).toContain("truncated=true\n한글");
+		expect(text).not.toContain("arrival-ordered tail");
+		if (outcome.code === null || outcome.cancelled || outcome.timedOut)
+			await expect(f.exec()).rejects.toThrow("locked");
+		await f.shutdown();
+	}
 });

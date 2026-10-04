@@ -222,8 +222,8 @@ function outcomeBody(text: string, details: ResultDetails | undefined, isError: 
 	const match = OUTCOME_HEADER.exec(text);
 	if (!match) return { body: text, truncated: details?.truncated === true };
 	const [, code, cancelled, timedOut, truncated] = match;
-	// Error results are thrown (and have no details); successful results retain
-	// details. Only strip the exact generated header, never a loose `exit=` line.
+	// Completed outcomes retain details, including failures. Historical thrown
+	// errors still use this exact-header fallback, never a loose `exit=` line.
 	if (!isError && (!details || details.code !== (code === "null" ? null : Number(code)) ||
 		details.cancelled !== (cancelled === "true") || details.timedOut !== (timedOut === "true") ||
 		details.truncated !== (truncated === "true")))
