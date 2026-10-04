@@ -234,7 +234,7 @@ test("HTML export's historical partial call context cannot start a timer", () =>
 	const interval = spyOn(globalThis, "setInterval");
 	try {
 		const exporter = createToolHtmlRenderer({
-			getToolDefinition: (name) => name === "sudo_exec" ? { renderCall: calls.renderCall } as never : undefined,
+			getToolRenderers: (name) => name === "sudo_exec" ? { renderCall: calls.renderCall } as never : undefined,
 			theme, cwd: "/tmp",
 		});
 		expect(exporter.renderCall("historical", "sudo_exec", { executable: "/usr/bin/id" })).toContain("/usr/bin/id");
@@ -277,5 +277,27 @@ test("live title animates; cancellation and shutdown cannot restart a partial ti
 		expect(calls.renderCall(args, theme, { ...running, toolCallId: "shutdown" }).render(120)).toEqual(['# /usr/bin/id "x\\n"']);
 	} finally {
 		calls.stopAll();
+	}
+});
+
+test("structured failures render ordered tails and keep cleanup warnings in both card states", () => {
+	const warning = "sudo -k cleanup failed; credential cache may remain valid";
+	for (const outcome of [
+		{ code: 3, cancelled: false, timedOut: false, label: "Error · exit=3" },
+		{ code: null, cancelled: true, timedOut: false, label: "Error · Cancelled" },
+		{ code: null, cancelled: false, timedOut: true, label: "Error · Timed out" },
+		{ code: null, cancelled: false, timedOut: false, label: "Error" },
+	]) {
+		const text = `exit=${outcome.code}, cancelled=${outcome.cancelled}, timedOut=${outcome.timedOut}, truncated=false\n${warning}\nmodel prefix`;
+		for (const expanded of [false, true]) {
+			for (const displayOutput of ["err-first\nout-last", ""]) {
+				const rendered = show(text, { ...outcome, truncated: false, displayOutput }, expanded, true).join("\n");
+				expect(rendered).toContain(outcome.label);
+				expect(rendered).toContain(warning);
+				expect(rendered).not.toContain("model prefix");
+				expect(rendered).not.toContain("cancelled=");
+				if (displayOutput) expect(rendered).toContain(displayOutput);
+			}
+		}
 	}
 });
