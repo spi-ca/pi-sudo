@@ -1,5 +1,11 @@
 # Changelog
 
+## v20261009-1
+
+- 공개 questionnaire UI 의존성을 검증된 `pi-ask-user#v20261009-1`로 동기화했습니다. `/ui`만 사용하며 승인·sudo 정책은 바꾸지 않습니다.
+
+- Pi 개발 의존성·lockfile·CI graph를 exact `1.1.0`으로 갱신했습니다. 관리자 권한·승인·`model-only` 경계는 유지합니다.
+
 ## v20261001-1
 
 - Pin the host Pi development dependencies and verified runtime graph to exact `0.99.2`.

@@ -247,6 +247,7 @@ class RecordingTerminal implements Terminal {
 	clearScreen() { this.write("\x1b[2J"); }
 	setTitle(_title: string) {}
 	setProgress(_active: boolean) {}
+	setProgramStatus(_status: Parameters<Terminal["setProgramStatus"]>[0]) {}
 }
 
 test("authentication resumes rendering after a request queued while TUI was stopped", async () => {
