@@ -9,7 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { trustedAskpass } from "./src/askpass.js";
 import { boundedError, boundedText, formatOutcome } from "./src/output.js";
-import { runProcess, sudoPath, type Runner } from "./src/process.js";
+import { runProcess, sudoBackend, type Runner, type SudoBackend } from "./src/process.js";
 import { SudoAccess, validMinutes, type Clock, type ReauthTicket } from "./src/sudo.js";
 import { createCallRenderer, renderResult } from "./src/render.js";
 
@@ -158,7 +158,6 @@ function checkHost(): void {
 		throw new Error("pi-sudo supports Linux and macOS only");
 	if (process.getuid?.() === 0)
 		throw new Error("Run Pi as a regular user, not root");
-	sudoPath();
 }
 
 export default function sudoExtension(
@@ -173,6 +172,7 @@ export default function sudoExtension(
 	resolveAskpass = trustedAskpass,
 	statusTimer: Pick<Clock, "setTimeout" | "clearTimeout"> = globalThis,
 	accessClock?: Clock,
+	resolveBackend: () => SudoBackend = sudoBackend,
 ): void {
 	const callRenderer = createCallRenderer();
 	let ui: ExtensionUIContext | undefined;
@@ -185,7 +185,8 @@ export default function sudoExtension(
 	};
 	const cleanupFailed = (error: unknown) =>
 		String(error).includes("sudo -k cleanup failed; credential cache may remain valid") ||
-		String(error).includes("sudo -k failed; credential cache may remain valid");
+		String(error).includes("sudo -k failed; credential cache may remain valid") ||
+		String(error).includes("Sudo backend unavailable or changed; credential cache may remain valid");
 	function updateStatus(): void {
 		stopRefresh();
 		if (closed || !ui) return;
@@ -219,7 +220,7 @@ export default function sudoExtension(
 	let touched = false;
 	// Fence UI awaits before unlock starts; SudoAccess.generation fences the later auth awaits.
 	let authorizationEpoch = 0;
-	// Recheck the sudo binary for every child, including late cleanup after a host failure.
+	// Host checks remain separate from SudoAccess's lazy, pinned backend validation.
 	const checkedRun: Runner = async (invocation) => {
 		const invalidating = invocation.args[0] === "-k";
 		try {
@@ -240,7 +241,7 @@ export default function sudoExtension(
 	};
 	const access = new SudoAccess(
 		checkedRun,
-		"/usr/bin/sudo",
+		resolveBackend,
 		accessClock,
 		updateStatus,
 		(error) => {

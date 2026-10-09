@@ -1,6 +1,6 @@
 /** Temporary grant policy, independent of Pi UI and of the concrete subprocess implementation. */
 import { isAbsolute } from "node:path";
-import type { Outcome, Runner } from "./process.js";
+import type { Outcome, Runner, SudoBackend } from "./process.js";
 
 const AUTH_TIMEOUT_MS = 120_000;
 const EXEC_TIMEOUT_MS = 60_000;
@@ -19,7 +19,7 @@ function probeFailure(result: Outcome): string {
 function authFailure(result: Outcome, askpass: boolean): string {
 	const phase = askpass ? "sudo -A -v" : "sudo -v";
 	const state = result.cancelled ? "cancelled" : result.timedOut ? "timed out" : `exit ${result.code}`;
-	return `${phase} authentication ${state}`;
+	return `${phase} authentication ${state}${askpass ? "; selected backend must support askpass (-A); no terminal/backend fallback" : ""}`;
 }
 
 export type Clock = {
@@ -80,21 +80,40 @@ export class SudoAccess {
 	private generation = 0;
 	// A possibly live direct sudo process makes another grant unsafe in this runtime.
 	private poisoned = false;
+	private backend?: SudoBackend;
 
-	private async invoke(invocation: Parameters<Runner>[0]): Promise<Outcome> {
-		const result = await this.run(invocation);
+	/** Never substitute a newly detected provider inside an existing grant or cleanup. */
+	private checkedBackend(): string {
+		if (typeof this.sudo === "string") return this.sudo; // Offline policy fixtures.
+		try {
+			const current = this.sudo();
+			if (!this.backend) this.backend = { ...current };
+			else if (current.identity !== this.backend.identity || current.path !== this.backend.path ||
+				current.selectedPath !== this.backend.selectedPath)
+				throw new Error("selected sudo path or binary identity changed");
+			return this.backend.path;
+		} catch (error) {
+			this.clear();
+			throw new Error(`Sudo backend unavailable or changed; credential cache may remain valid; explicit /sudo unlock required; no backend retry: ${String(error)}`);
+		}
+	}
+
+	private async invoke(invocation: Omit<Parameters<Runner>[0], "executable">): Promise<Outcome> {
+		const result = await this.run({ ...invocation, executable: this.checkedBackend() });
 		if (result.terminationUnconfirmed) {
 			this.poisoned = true;
 			throw new Error(
 				"sudo process termination could not be confirmed. Inspect running privileged processes; restart Pi before another unlock.",
 			);
 		}
+		// A package replacement during authentication/execution cannot retain admission.
+		this.checkedBackend();
 		return result;
 	}
 
 	constructor(
 		private readonly run: Runner,
-		private readonly sudo: string,
+		private readonly sudo: string | (() => SudoBackend),
 		private readonly time: Clock = clock,
 		private readonly onChange: () => void = () => {},
 		private readonly onExpiryError: (error: unknown) => void = () => {},
@@ -156,7 +175,6 @@ export class SudoAccess {
 		let result: Outcome;
 		try {
 			result = await this.invoke({
-				executable: this.sudo,
 				args: ["-k"],
 				timeoutMs: INVALIDATE_TIMEOUT_MS,
 			});
@@ -172,6 +190,7 @@ export class SudoAccess {
 		if (this.active || this.locking || this.poisoned) throw new Error("Sudo is busy or unavailable");
 		const remaining = this.remainingMs();
 		if (!remaining) throw new Error("Sudo is locked or expired; use /sudo unlock first");
+		this.checkedBackend();
 		const deadline = this.deadline!;
 		const wallDeadline = this.wallDeadline;
 		this.clear();
@@ -238,6 +257,8 @@ export class SudoAccess {
 		return this.start(async (signal) => {
 			let invalidated = false;
 			try {
+				// Only a new explicit unlock may select a new backend. Reauth/cleanup stay pinned.
+				if (minutes !== undefined && typeof this.sudo !== "string") this.backend = { ...this.sudo() };
 				await this.invalidate();
 				// Combining -k with -v ignores and does not update the cache.
 				invalidated = true;
@@ -247,7 +268,6 @@ export class SudoAccess {
 				let auth: Outcome;
 				try {
 					auth = await this.invoke({
-						executable: this.sudo,
 						args: helper ? ["-A", "-v"] : ["-v"],
 						interactive: !helper,
 						askpass: helper,
@@ -268,7 +288,6 @@ export class SudoAccess {
 				let probe: Outcome;
 				try {
 					probe = await this.invoke({
-						executable: this.sudo,
 						args: ["-n", "--", "/usr/bin/true"],
 						timeoutMs: INVALIDATE_TIMEOUT_MS,
 						signal,
@@ -336,7 +355,6 @@ export class SudoAccess {
 				if (ownSignal.aborted || !remaining)
 					throw new Error("Sudo execution cancelled or expired before spawn");
 				const result = await this.invoke({
-					executable: this.sudo,
 					args: ["-n", "--", executable, ...args],
 					cwd,
 					timeoutMs: Math.min(EXEC_TIMEOUT_MS, remaining),

@@ -1,6 +1,7 @@
 /** Direct-child transport: terminal handoff, bounded capture and best-effort cancellation. */
 import { spawn } from "node:child_process";
-import { statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync, type Stats } from "node:fs";
+import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 export type Invocation = {
@@ -34,20 +35,56 @@ export type Outcome = {
 };
 export type Runner = (invocation: Invocation) => Promise<Outcome>;
 
-export function sudoPath(): string {
-	const path = "/usr/bin/sudo";
-	const stat = statSync(path);
-	if (
-		!stat.isFile() ||
-		stat.uid !== 0 ||
-		(stat.mode & 0o111) === 0 ||
-		(stat.mode & 0o022) !== 0
-	) {
-		throw new Error(
-			"/usr/bin/sudo must be a root-owned executable, not group/world writable",
-		);
+export type SudoBackend = {
+	/** Fixed AUTO candidate, independent of PATH and of implementation language. */
+	selectedPath: string;
+	/** Execute the validated canonical target, not an ambient alias. */
+	path: string;
+	identity: string;
+};
+export type BackendFiles = {
+	lstat(path: string): Stats;
+	realpath(path: string): string;
+	stat(path: string): Stats;
+};
+const backendFiles: BackendFiles = { lstat: lstatSync, realpath: realpathSync, stat: statSync };
+
+function fileIdentity(stat: Stats): unknown[] {
+	return [stat.dev, stat.ino, stat.uid, stat.gid, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs];
+}
+
+/** Absence alone permits fallback. A dangling link or unsafe default fails closed. */
+export function sudoBackend(fs: BackendFiles = backendFiles): SudoBackend {
+	let selectedPath = "/usr/bin/sudo";
+	let selected: Stats;
+	try {
+		selected = fs.lstat(selectedPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		selectedPath = "/usr/bin/sudo-rs";
+		selected = fs.lstat(selectedPath);
 	}
-	return path;
+	try {
+		const path = fs.realpath(selectedPath);
+		const target = fs.stat(path);
+		if (selected.uid !== 0) throw new Error("untrusted selected path");
+		// Check both the fixed route and the canonical target's ancestors.
+		for (const start of [dirname(selectedPath), path]) {
+			let current = start;
+			while (true) {
+				const stat = current === path ? target : fs.stat(current);
+				if (stat.uid !== 0 || (stat.mode & 0o022) !== 0 ||
+					(current === path ? !stat.isFile() || (stat.mode & 0o111) === 0 : !stat.isDirectory()))
+					throw new Error("untrusted ownership, permissions or file type");
+				const parent = dirname(current);
+				if (parent === current) break;
+				current = parent;
+			}
+		}
+		return { selectedPath, path, identity: JSON.stringify([selectedPath, path, fileIdentity(selected), fileIdentity(target)]) };
+	} catch {
+		throw new Error(`${selectedPath} and its canonical ancestors must be root-owned, non-writable by group/others; sudo must be a regular executable (no backend fallback)`);
+	}
 }
 
 const OUTPUT_LIMIT = 32 * 1024;

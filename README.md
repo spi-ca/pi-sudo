@@ -22,7 +22,7 @@ pi install git:github.com/spi-ca/pi-sudo
 pi -e /absolute/path/to/pi-sudo/index.ts
 ```
 
-Linux/macOS의 일반 사용자, 실제 터미널 입출력, 적합한 `/usr/bin/sudo`가 필요합니다. 실제 sudo 인증과 GUI askpass 수동 검증은 아직 수행하지 않았습니다.
+Linux/macOS의 일반 사용자, 실제 터미널 입출력, 신뢰 가능한 시스템 sudo가 필요합니다. AUTO 선택은 고정 `/usr/bin/sudo`를 우선하며(시스템 공급자가 sudo-rs여도 그대로 사용), 이 경로가 없을 때만 `/usr/bin/sudo-rs`를 사용합니다. PATH·쉘 alias는 탐색하지 않으며 기존 기본 경로가 안전하지 않으면 대체하지 않고 실패합니다. 허가 중 선택 경로·바이너리 신원이 바뀌면 접근을 철회하며 새 `/sudo unlock`으로 명시적으로 확인·인증해야 합니다. 자세한 신뢰 검사와 구형 sudo-rs의 askpass 제한은 [보안 경계](docs/security.md#시스템-sudo-auto-선택)를 참고하세요. 실제 Linux/macOS sudo·sudo-rs 인증과 GUI askpass 수동 검증은 아직 수행하지 않았습니다.
 
 1. `/sudo unlock`을 실행해 경고와 선택된 인증 방식을 확인합니다. 기본 유효 기간은 5분이며 `/sudo unlock 1`부터 `/sudo unlock 180`까지 정수 분을 지정할 수 있습니다. 확인창은 `1. NO`를 기본 선택으로 표시하며 숫자 `1`은 즉시 거절, `2`는 경고가 모두 보일 때 즉시 승인합니다(에이전트 실행 중이면 idle 이후 인증). 화살표로 이동한 뒤 Enter로 확정할 수도 있습니다(Enter만 누르면 거부). `SUDO_ASKPASS`가 없으면 **실제 터미널**에서 인증하고, 설정되어 있으면 신뢰 검사를 통과한 시스템 도우미를 sudo가 호출합니다. 유효하지 않은 도우미나 인증 실패는 터미널 방식으로 대체하지 않습니다. 어느 모드든 권한을 사용하는 도구는 일반 `bash`가 아닌 `sudo_exec`입니다.
 
