@@ -23,7 +23,7 @@
 
 ## 모델 도구
 
-`sudo_exec`는 Pi `1.0.2`의 `model-only` 도구입니다. 모델이 직접 호출할 수 있지만 codemode 스크립트와 다른 도구의 `ctx.executeTool()`에서는 호출할 수 없습니다. 이는 Pi의 도구 노출 경계이며 OS 권한 격리나 일반 `bash`의 보안 sandbox를 뜻하지 않습니다.
+`sudo_exec`는 Pi `1.1.0`의 `model-only` 도구입니다. 모델이 직접 호출할 수 있지만 codemode 스크립트와 다른 도구의 `ctx.executeTool()`에서는 호출할 수 없습니다. 이는 Pi의 도구 노출 경계이며 OS 권한 격리나 일반 `bash`의 보안 sandbox를 뜻하지 않습니다.
 
 `sudo_exec`의 입력 예:
 

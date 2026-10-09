@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      PI_GRAPH_EXPECTED: '{"@earendil-works/chord":"1.0.2","@earendil-works/pi-agent-core":"1.0.2","@earendil-works/pi-ai":"1.0.2","@earendil-works/pi-codemode":"1.0.2","@earendil-works/pi-coding-agent":"1.0.2","@earendil-works/pi-mcp":"1.0.2","@earendil-works/pi-telemetry":"1.0.2","@earendil-works/pi-tui":"1.0.2"}'
+      PI_GRAPH_EXPECTED: '{"@earendil-works/chord":"1.1.0","@earendil-works/pi-agent-core":"1.1.0","@earendil-works/pi-ai":"1.1.0","@earendil-works/pi-codemode":"1.1.0","@earendil-works/pi-coding-agent":"1.1.0","@earendil-works/pi-mcp":"1.1.0","@earendil-works/pi-telemetry":"1.1.0","@earendil-works/pi-tui":"1.1.0"}'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
