@@ -38,11 +38,13 @@ flowchart TB
 | `src/askpass.ts` | 실경로 도우미와 상위 디렉터리 신뢰 검사 | GUI 실행·sudo 정책 |
 | `src/render.ts` | 도구 카드의 `#` 호출 제목·경과 시간·출력 미리보기; Pi가 제공하는 진행·성공·오류 배경 사용 | sudo 허가 판정·도구 이름 변경 |
 | `src/output.ts` | UTF-8 최종 모델 출력 제한 | 인증 출력 저장 |
-| `src/sudo.ts` | 입력 유효성 검사, 인증/시험/실행/철회 상태, 기한·동시성·취소 등 실패 폐쇄 | TUI 소유, 자식 프로세스 생성 세부 사항 |
-| `src/process.ts` | `/usr/bin/sudo` 파일 검사, `spawn`·타임아웃·신호·제한된 출력 수집 | sudo 정책 결정, 후손 종료 보장 |
+| `src/sudo.ts` | 입력 유효성 검사, 백엔드 신원 고정·재검증, 인증/시험/실행/철회 상태, 기한·동시성·취소 등 실패 폐쇄 | TUI 소유, 자식 프로세스 생성 세부 사항 |
+| `src/process.ts` | 고정 시스템 경로 AUTO 선택·정규 파일/상위 디렉터리 신뢰 검사, `spawn`·타임아웃·신호·제한된 출력 수집 | sudo 정책 결정, 후손 종료 보장 |
 | `test/extension.test.ts` | Pi 진입점 등록과 TUI·shutdown·tool 경계 | 실제 터미널 인증 |
 | `test/sudo.test.ts` | 가짜 clock/runner로 인증 순서·기한·경합·poison 검증 | OS sudo cache 실제 동작 |
 | `test/process.test.ts` | 비특권 subprocess의 출력·종료·pipe 감시 | privileged 자식 종료 보장 |
+
+그림의 `/usr/bin/sudo`는 우선 선택 경로입니다. 이 경로가 없으면 `/usr/bin/sudo-rs`를 선택하며 시스템 `/usr/bin/sudo` 자체가 Rust 공급자여도 우선순위는 같습니다. `src/process.ts`가 파일시스템 검사와 신원 정보를 제공하고 `SudoAccess`가 새 명시적 unlock 시 지연 선택하여 같은 정규 경로를 인증·시험·실행·정리에 고정합니다. 각 자식 호출 전후 선택 경로·파일 신원을 비교하며 변경되거나 신뢰 검사에 실패하면 논리적 허가를 철회합니다. reauth에서는 새 백엔드를 선택하지 않습니다. 달라진 바이너리로 캐시 정리를 대신하지 않으며 자동 인증/실행 재시도도 없습니다. 자세한 검사·경합 한계는 [보안 경계](security.md#시스템-sudo-auto-선택)에 있습니다.
 
 루트 `index.ts`를 유지하는 이유는 `package.json`의 `pi.extensions`가 `./index.ts`를 참조하기 때문입니다. Pi UI 관심사와 sudo 허가 상태, OS 프로세스 수명주기를 분리해 각각의 테스트 경계를 명확히 합니다.
 

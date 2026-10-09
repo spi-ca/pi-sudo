@@ -7,7 +7,7 @@ import type {
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
-import { runProcess, type Invocation, type Outcome, type Runner } from "../src/process.js";
+import { runProcess, type Invocation, type Outcome, type Runner, type SudoBackend } from "../src/process.js";
 import type { Clock } from "../src/sudo.js";
 import { Container, CURSOR_MARKER, TuiMainScreen, TuiAltScreen, getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import type { Terminal, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
@@ -49,6 +49,7 @@ function fixture(
 		askpass?: () => string | undefined;
 		resolveAskpass?: (value: string | undefined) => string;
 		clock?: Clock;
+		backend?: () => SudoBackend;
 		waitForIdle?: () => Promise<void>;
 	} = {},
 ) {
@@ -93,6 +94,7 @@ function fixture(
 		options.resolveAskpass ?? (() => "/trusted/helper"),
 		options.clock,
 		options.clock,
+		options.backend ?? (() => ({ selectedPath: "/usr/bin/sudo", path: "/usr/bin/sudo", identity: "fake-classic" })),
 	);
 	const ctx = {
 		mode: options.mode ?? "tui",
@@ -858,26 +860,27 @@ test("completed nonzero tool outcome remains a Pi tool error without revoking or
 	await f.shutdown();
 });
 
-test("configured askpass is automatic, stays in TUI, and uses only auth invocation", async () => {
-	const f = fixture({ askpass: () => "/trusted/helper" });
-	await f.command("unlock");
-	expect(f.events).toEqual(["confirm", "idle"]);
-	expect(f.calls.map((call) => call.args)).toEqual([
-		["-k"],
-		["-A", "-v"],
-		["-n", "--", "/usr/bin/true"],
-	]);
-	expect(f.calls[1]).toMatchObject({
-		askpass: "/trusted/helper",
-		interactive: false,
-	});
-	await f.exec();
-	await f.command("lock");
-	expect(f.calls.filter((call) => call.askpass)).toHaveLength(1);
-	const defaultMode = fixture();
-	await defaultMode.command("unlock");
-	expect(defaultMode.calls[1].args).toEqual(["-v"]);
-	expect(defaultMode.calls[1].askpass).toBeUndefined();
+test("configured askpass is automatic for both backends, stays in TUI, and uses only auth invocation", async () => {
+	for (const path of ["/usr/bin/sudo", "/usr/bin/sudo-rs"]) {
+		const backend = () => ({ selectedPath: path, path, identity: path });
+		const f = fixture({ backend, askpass: () => "/trusted/helper" });
+		await f.command("unlock");
+		expect(f.events).toEqual(["confirm", "idle"]);
+		expect(f.warnings[0]).toContain("Authenticate with OS askpass (/trusted/helper)");
+		expect(f.calls.map((call) => call.args)).toEqual([
+			["-k"], ["-A", "-v"], ["-n", "--", "/usr/bin/true"],
+		]);
+		expect(f.calls[1]).toMatchObject({ askpass: "/trusted/helper", interactive: false });
+		await f.exec();
+		await f.command("lock");
+		expect(f.calls.filter((call) => call.askpass)).toHaveLength(1);
+		expect(f.calls.every(call => call.executable === path)).toBe(true);
+		const defaultMode = fixture({ backend });
+		await defaultMode.command("unlock");
+		expect(defaultMode.calls[1].args).toEqual(["-v"]);
+		expect(defaultMode.calls[1].askpass).toBeUndefined();
+		await defaultMode.shutdown();
+	}
 });
 
 test("askpass helper control characters are escaped in the approval screen", async () => {
@@ -1479,4 +1482,75 @@ test("completed error outcomes retain bounded model text, details, and revoked a
 			await expect(f.exec()).rejects.toThrow("locked");
 		await f.shutdown();
 	}
+});
+
+test("standalone sudo-rs keeps askpass gating, revalidation and unsupported failure without fallback", async () => {
+	const path = "/usr/bin/sudo-rs";
+	const backend = () => ({ selectedPath: path, path, identity: "fake-rs" });
+	for (const options of [{ tty: false }, { mode: "rpc" }, { confirm: async () => false }]) {
+		const f = fixture({ backend, askpass: () => "/trusted/helper", ...options });
+		await f.command("unlock"); expect(f.calls).toHaveLength(0);
+	}
+	let resolutions = 0;
+	const changed = fixture({ backend, askpass: () => "/trusted/helper", resolveAskpass: () => {
+		if (++resolutions === 2) throw Error("changed helper");
+		return "/trusted/helper";
+	} });
+	await changed.command("unlock");
+	expect(resolutions).toBe(2);
+	expect(changed.messages.at(-1)).toContain("changed helper");
+	expect(changed.calls.map(call => call.args)).toEqual([["-k"], ["-k"]]);
+	const unsupported = fixture({ backend, askpass: () => "/trusted/helper", run: async call =>
+		call.args[0] === "-A" ? { ...ok, code: 1, stderr: "PRIVATE-CANARY" } : ok });
+	await unsupported.command("unlock");
+	expect(unsupported.messages.at(-1)).toContain("must support askpass (-A)");
+	expect(unsupported.messages.join(" ")).not.toContain("PRIVATE-CANARY");
+	expect(unsupported.calls.map(call => call.args)).toEqual([["-k"], ["-A", "-v"], ["-k"]]);
+	expect(unsupported.events).not.toContain("stop");
+	expect(unsupported.calls.every(call => call.executable === path)).toBe(true);
+	await expect(unsupported.exec()).rejects.toThrow("locked");
+});
+
+test("reauth backend rejection revokes access and preserves residual-cache warning without any replacement child", async () => {
+	for (const unavailable of [false, true]) {
+		let changed = false;
+		const f = fixture({ backend: () => {
+			if (changed && unavailable) throw new Error("backend disappeared");
+			return { selectedPath: "/usr/bin/sudo-rs", path: "/usr/bin/sudo-rs", identity: changed ? "replaced" : "original" };
+		} });
+		f.startup();
+		try {
+			await f.command("unlock 1");
+			expect(f.calls).toHaveLength(3);
+			changed = true;
+			await f.command("reauth");
+			expect(f.calls).toHaveLength(3);
+			expect(f.messages.at(-1)).toContain("credential cache may remain valid");
+			expect(f.messages.at(-1)).toContain("explicit /sudo unlock");
+			await expect(f.exec()).rejects.toThrow("locked");
+			expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+			await f.command("status");
+			expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+			expect(f.calls).toHaveLength(3);
+		} finally {
+			await f.shutdown();
+		}
+	}
+});
+
+test("backend selection is lazy; an identity change revokes adapter access without child fallback", async () => {
+	let identity = "original", selections = 0;
+	const f = fixture({ backend: () => {
+		selections++;
+		return { selectedPath: "/usr/bin/sudo", path: "/usr/bin/sudo", identity };
+	} });
+	expect(selections).toBe(0);
+	await f.command("status"); expect(selections).toBe(0);
+	await f.command("unlock 1"); identity = "replaced";
+	await expect(f.exec()).rejects.toThrow("explicit /sudo unlock");
+	expect(f.calls).toHaveLength(3);
+	await f.command("status"); expect(f.messages.at(-1)).toBe("sudo locked");
+	await f.command("unlock 1");
+	expect(f.messages.at(-1)).toContain("sudo_exec is ready");
+	await f.shutdown();
 });

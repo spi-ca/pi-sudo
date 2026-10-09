@@ -11,7 +11,7 @@ bun test
 bun run docs:check
 ```
 
-별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 Enter의 NO 기본 선택·숫자 `1`/`2`의 즉시 거절/승인·공유 설문 컴포넌트의 설정된 키/마우스와 가시성 게이트·좁은 화면에서 승인 차단 UI·실제 TuiMainScreen/TuiAltScreen 렌더와 중지·재개와 스크롤백 보존·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 1~180분 기한·동시성·인증 단계별 진단·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
+별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 Enter의 NO 기본 선택·숫자 `1`/`2`의 즉시 거절/승인·공유 설문 컴포넌트의 설정된 키/마우스와 가시성 게이트·좁은 화면에서 승인 차단 UI·실제 TuiMainScreen/TuiAltScreen 렌더와 중지·재개와 스크롤백 보존·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 1~180분 기한·동시성·인증 단계별 진단·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. `test/backend.test.ts`는 주입된 파일시스템·runner만으로 기본 경로 우선/부재/위험 경로 거부·심볼릭 링크·백엔드 고정·신원 변경과 재잠금·두 백엔드의 askpass 실패/무대체를 검증합니다. 확장 로드나 `status`에서 실제 호스트 파일을 미리 검사하지 않으며 확장 테스트도 가짜 백엔드를 주입합니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
 
 ## GitHub Actions CI
 
@@ -51,7 +51,7 @@ docs/diagram/*.mmd           다이어그램 정본
 
 ## 수정 시 주의점
 
-`index.ts`는 `pi-ask-user/ui`의 공개 설문 컴포넌트로 확인을 표시합니다. 질문 정규화 결과가 위험 경고나 도우미 경로를 잘라내면 확인 자체를 거부하고, 현재 화면 전체 높이·도크 형제 높이를 검사한 뒤에만 YES를 허용해야 합니다. 런타임 의존성은 `github:spi-ca/pi-ask-user#v20261009-1`로 고정하며 lockfile도 함께 갱신합니다. UI 경로만 import하므로 `ask_user` 도구를 중복 등록하지 않습니다. `index.ts`는 UI/epoch/touched를 관리하고 실제 접근은 `src/sudo.ts`에서만 판정해야 합니다. `src/sudo.ts`는 인증 전 `-k`, 대화형 `-v`, 비대화형 `/usr/bin/true` 시험을 별도로 유지하고 실패 시 논리적 접근을 먼저 철회합니다. `src/process.ts`는 같은 부모의 non-detached 프로세스를 실행하며 직접 자식 종료와 출력 파이프 닫힘을 혼동하지 않아야 합니다. 상세 모듈 경계와 그림은 [구조](architecture.md)에 있습니다.
+`index.ts`는 `pi-ask-user/ui`의 공개 설문 컴포넌트로 확인을 표시합니다. 질문 정규화 결과가 위험 경고나 도우미 경로를 잘라내면 확인 자체를 거부하고, 현재 화면 전체 높이·도크 형제 높이를 검사한 뒤에만 YES를 허용해야 합니다. 런타임 의존성은 `github:spi-ca/pi-ask-user#v20261009-1`로 고정하며 lockfile도 함께 갱신합니다. UI 경로만 import하므로 `ask_user` 도구를 중복 등록하지 않습니다. `index.ts`는 UI/epoch/touched를 관리하고 실제 접근은 `src/sudo.ts`에서만 판정해야 합니다. `src/sudo.ts`는 인증 전 `-k`, 대화형 `-v`, 비대화형 `/usr/bin/true` 시험을 별도로 유지하고 실패 시 논리적 접근을 먼저 철회합니다. `src/process.ts`의 AUTO 선택은 `/usr/bin/sudo`가 없을 때만 `/usr/bin/sudo-rs`로 진행하고 위험한 기존 경로에서는 실패해야 합니다. `SudoAccess`는 새 명시적 unlock에서만 백엔드를 선택하고 reauth·인증·시험·실행·정리에 같은 신원을 고정합니다. 자식 호출 전후 신원 변경은 접근 철회와 오류로 끝나며 새 백엔드로 정리하거나 인증·명령을 재시도하지 않습니다. `src/process.ts`는 같은 부모의 non-detached 프로세스를 실행하며 직접 자식 종료와 출력 파이프 닫힘을 혼동하지 않아야 합니다. 상세 모듈 경계와 그림은 [구조](architecture.md)에 있습니다.
 
 그림 변경 뒤 `bun run docs:render`로 rootless Podman에서 SVG·2배 해상도 PNG와 아키텍처 문서의 생성 블록을 갱신합니다. `bun run docs:diagrams`는 Markdown만 동기화하고, `bun run docs:check`는 정본 코드와 생성 블록의 일치만 확인합니다. 이미지 최신 여부·문법·렌더 검사를 대신하지 않습니다. 고정 이미지와 컨테이너 격리 조건은 [다이어그램 안내](diagram/README.md)를 따릅니다.
 
