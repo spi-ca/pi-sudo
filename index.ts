@@ -11,7 +11,7 @@ import { trustedAskpass } from "./src/askpass.js";
 import { boundedError, boundedText, formatOutcome } from "./src/output.js";
 import { runProcess, sudoBackend, type Runner, type SudoBackend } from "./src/process.js";
 import { SudoAccess, validMinutes, type Clock, type ReauthTicket } from "./src/sudo.js";
-import { createCallRenderer, renderResult } from "./src/render.js";
+import { createCallRenderer, renderResult, type CallClock } from "./src/render.js";
 
 const approvalWarnings = [
 	"• The model can run any sudo-policy command without asking again. Use sudo_exec, not bash.",
@@ -173,8 +173,9 @@ export default function sudoExtension(
 	statusTimer: Pick<Clock, "setTimeout" | "clearTimeout"> = globalThis,
 	accessClock?: Clock,
 	resolveBackend: () => SudoBackend = sudoBackend,
+	callClock?: CallClock,
 ): void {
-	const callRenderer = createCallRenderer();
+	const callRenderer = createCallRenderer(callClock);
 	let ui: ExtensionUIContext | undefined;
 	let closed = false;
 	let cacheWarning = false;

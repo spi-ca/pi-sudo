@@ -15,6 +15,18 @@ const PREVIEW_ROWS = 8;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_INTERVAL_MS = 500;
 
+export interface CallClock {
+	now(): number;
+	setInterval(callback: () => void, delay: number): ReturnType<typeof setInterval>;
+	clearInterval(timer: ReturnType<typeof setInterval>): void;
+}
+
+const defaultCallClock: CallClock = {
+	now: () => performance.now(),
+	setInterval: (callback, delay) => setInterval(callback, delay),
+	clearInterval: (timer) => clearInterval(timer),
+};
+
 type CallComponent = { render(width: number): string[]; invalidate(): void };
 type CallState = {
 	frame: number;
@@ -23,12 +35,12 @@ type CallState = {
 	invalidate?: () => void;
 };
 // Only execute() admits a live call. Renderer flags alone also describe HTML export.
-export function createCallRenderer() {
+export function createCallRenderer(clock: CallClock = defaultCallClock) {
 	const callStates = new Map<string, CallState>();
 	const stop = (id: string) => {
 		const state = callStates.get(id);
 		if (!state) return;
-		if (state.timer) clearInterval(state.timer);
+		if (state.timer) clock.clearInterval(state.timer);
 		state.timer = undefined;
 		state.invalidate = undefined;
 		callStates.delete(id);
@@ -36,14 +48,14 @@ export function createCallRenderer() {
 	return {
 		start(id: string) {
 			stop(id);
-			callStates.set(id, { frame: 0, startedAt: Date.now() });
+			callStates.set(id, { frame: 0, startedAt: clock.now() });
 		},
 		stop,
 		stopAll() {
 			for (const id of callStates.keys()) stop(id);
 		},
 		renderCall: (args: DisplayArgs, theme: Theme, context: ToolRenderContext) =>
-			renderCall(args, theme, context, callStates),
+			renderCall(args, theme, context, callStates, clock),
 	};
 }
 
@@ -161,6 +173,7 @@ export function renderCall(
 	theme: Theme,
 	context: ToolRenderContext,
 	callStates?: Map<string, CallState>,
+	clock: CallClock = defaultCallClock,
 ): CallComponent {
 	const id = context.toolCallId;
 	const state = id && context.executionStarted && context.isPartial ? callStates?.get(id) : undefined;
@@ -186,7 +199,7 @@ export function renderCall(
 	const component: CallComponent = {
 		render(width: number) {
 			const prefix = state?.timer ? theme.fg("warning", `${SPINNER_FRAMES[state.frame]} `) : "";
-			const elapsed = state?.timer ? theme.fg("muted", ` · ${elapsedTime(Date.now() - state.startedAt)}`) : "";
+			const elapsed = state?.timer ? theme.fg("muted", ` · ${elapsedTime(clock.now() - state.startedAt)}`) : "";
 			const line = prefix + title + " " + command + elapsed;
 			return [
 				...display([], [line], [], context.expanded, 4, (hint) => theme.fg("muted", hint)).render(width),
@@ -199,7 +212,8 @@ export function renderCall(
 	if (state && spinning) {
 		state.invalidate = context.invalidate;
 		if (!state.timer) {
-			state.timer = setInterval(() => {
+			state.timer = clock.setInterval(() => {
+				if (callStates?.get(id!) !== state) return;
 				state!.frame = (state!.frame + 1) % SPINNER_FRAMES.length;
 				state!.invalidate?.();
 			}, SPINNER_INTERVAL_MS);
