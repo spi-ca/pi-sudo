@@ -8,6 +8,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
 import { runProcess, type Invocation, type Outcome, type Runner, type SudoBackend } from "../src/process.js";
+import { fakeClock } from "./clock.js";
+import type { CallClock } from "../src/render.js";
 import type { Clock } from "../src/sudo.js";
 import { Container, CURSOR_MARKER, TuiMainScreen, TuiAltScreen, getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import type { Terminal, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
@@ -49,6 +51,7 @@ function fixture(
 		askpass?: () => string | undefined;
 		resolveAskpass?: (value: string | undefined) => string;
 		clock?: Clock;
+		callClock?: CallClock;
 		backend?: () => SudoBackend;
 		waitForIdle?: () => Promise<void>;
 	} = {},
@@ -95,6 +98,7 @@ function fixture(
 		options.clock,
 		options.clock,
 		options.backend ?? (() => ({ selectedPath: "/usr/bin/sudo", path: "/usr/bin/sudo", identity: "fake-classic" })),
+		options.callClock,
 	);
 	const ctx = {
 		mode: options.mode ?? "tui",
@@ -1054,38 +1058,6 @@ test("askpass failure and helper substitution never grant or fall back", async (
 	await expect(rechecked.exec()).rejects.toThrow("locked");
 });
 
-function fakeClock() {
-	let time = 0;
-	let next = 0;
-	const timers = new Map<number, { at: number; callback: () => void }>();
-	const scheduler = {
-		now: () => time,
-		wallNow: () => time,
-		setTimeout: (callback: () => void, delay: number) => {
-			const id = ++next;
-			timers.set(id, { at: time + delay, callback });
-			return { unref() {}, id } as unknown as ReturnType<typeof setTimeout>;
-		},
-		clearTimeout: (timer: ReturnType<typeof setTimeout>) => { timers.delete((timer as unknown as { id: number }).id); },
-	};
-	return {
-		scheduler,
-		count: () => timers.size,
-		advance(ms: number) {
-			const end = time + ms;
-			for (;;) {
-				const due = [...timers].filter(([, timer]) => timer.at <= end)
-					.sort((a, b) => a[1].at - b[1].at)[0];
-				if (!due) break;
-				time = due[1].at;
-				timers.delete(due[0]);
-				due[1].callback();
-			}
-			time = end;
-		},
-	};
-}
-
 test("locked status stays hidden, pending is not a grant, duplicate unlock cannot mask a grant", async () => {
 	const clock = fakeClock();
 	let release!: (approved: boolean) => void;
@@ -1231,35 +1203,40 @@ test("initial invalidation spawn failure and restoration cleanup failure warn", 
 
 test("print executions leave no spinner IDs; live cancellation and shutdown stop timers", async () => {
 	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Parameters<NonNullable<ToolDefinition["renderCall"]>>[1];
+	const clock = fakeClock();
 	let ticks = 0;
 	const context = (id: string) => ({ cwd: "/tmp", toolCallId: id, executionStarted: true, isPartial: true, expanded: false, invalidate: () => { ticks++; } }) as Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
-	const print = fixture({ mode: "print" });
+	const print = fixture({ mode: "print", callClock: clock.scheduler });
 	for (let i = 0; i < 30; i++) {
 		await expect(print.exec(undefined, undefined, `print-${i}`)).rejects.toThrow("locked");
 		expect(print.renderCall({}, theme, context(`print-${i}`)).render(80)).toEqual(["# …"]);
 	}
 	await print.shutdown();
 	let release!: (outcome: Outcome) => void;
-	const live = fixture({ run: async (call) => call.args[2] === "/usr/bin/id" ? new Promise(resolve => { release = resolve; }) : ok });
+	const live = fixture({ callClock: clock.scheduler, run: async (call) => call.args[2] === "/usr/bin/id" ? new Promise(resolve => { release = resolve; }) : ok });
 	await live.command("unlock");
 	const controller = new AbortController();
 	const executing = live.exec(controller.signal);
 	await Promise.resolve();
 	const active = live.renderCall({}, theme, context("id"));
 	expect(active.render(80).join(" ")).toContain("⠋");
+	clock.advance(1_000);
+	expect(ticks).toBe(2);
 	controller.abort();
 	expect(live.renderCall({}, theme, context("id")).render(80)).toEqual(["# …"]);
 	release({ ...ok, cancelled: true });
 	expect(await executing).toMatchObject({ isError: true, details: { cancelled: true } });
 	const before = ticks;
-	await Bun.sleep(550);
+	expect(clock.count()).toBe(0);
+	clock.advance(5_000);
 	expect(ticks).toBe(before);
 	await live.shutdown();
 });
 
 test("shutdown stops an in-flight spinner and a replacement runtime cannot inherit it", async () => {
+	const clock = fakeClock();
 	let release!: (outcome: Outcome) => void;
-	const f = fixture({ run: async (call) => call.args[2] === "/usr/bin/id" ? new Promise(resolve => { release = resolve; }) : ok });
+	const f = fixture({ callClock: clock.scheduler, run: async (call) => call.args[2] === "/usr/bin/id" ? new Promise(resolve => { release = resolve; }) : ok });
 	await f.command("unlock");
 	const executing = f.exec();
 	await Promise.resolve();
@@ -1269,11 +1246,12 @@ test("shutdown stops an in-flight spinner and a replacement runtime cannot inher
 	expect(f.renderCall({}, theme, context).render(80).join(" ")).toContain("⠋");
 	const closing = f.shutdown();
 	expect(f.renderCall({}, theme, context).render(80)).toEqual(["# …"]);
-	const replacement = fixture();
+	const replacement = fixture({ callClock: clock.scheduler });
 	expect(replacement.renderCall({}, theme, context).render(80)).toEqual(["# …"]);
 	release({ ...ok, cancelled: true });
 	await Promise.allSettled([executing, closing]);
-	await Bun.sleep(550);
+	expect(clock.count()).toBe(0);
+	clock.advance(5_000);
 	expect(ticks).toBe(0);
 	await replacement.shutdown();
 });

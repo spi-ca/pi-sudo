@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { createToolHtmlRenderer } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/export-html/tool-renderer.js";
+import { fakeClock } from "./clock.js";
 import { createCallRenderer, renderCall, renderResult } from "../src/render.js";
 
 type ToolRenderContext = Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
@@ -248,8 +249,9 @@ test("HTML export's historical partial call context cannot start a timer", () =>
 	}
 });
 
-test("live title animates; cancellation and shutdown cannot restart a partial timer", async () => {
-	const calls = createCallRenderer();
+test("live title animates; cancellation and shutdown cannot restart a partial timer", () => {
+	const clock = fakeClock();
+	const calls = createCallRenderer(clock.scheduler);
 	const args = { executable: "/usr/bin/id", args: ["x\n"] };
 	let ticks = 0;
 	const running = { ...context, toolCallId: "running", executionStarted: true, isPartial: true, invalidate: () => { ticks++; } } as ToolRenderContext;
@@ -258,13 +260,17 @@ test("live title animates; cancellation and shutdown cannot restart a partial ti
 		calls.start("running");
 		const component = calls.renderCall(args, theme, running);
 		expect(component.render(120).join(" ")).toMatch(/^⠋ # \/usr\/bin\/id "x\\n" · 0s$/);
-		await Bun.sleep(1050);
-		expect(ticks).toBeGreaterThanOrEqual(1);
-		expect(component.render(120).join(" ")).toMatch(/ · 1s$/);
+		clock.advance(999);
+		expect(ticks).toBe(1);
+		expect(component.render(120).join(" ")).toMatch(/^⠙ .* · 0s$/);
+		clock.advance(1);
+		expect(ticks).toBe(2);
+		expect(component.render(120).join(" ")).toMatch(/^⠹ .* · 1s$/);
 		calls.stop("running");
 		expect(calls.renderCall(args, theme, { ...running, isPartial: false }).render(120)).toEqual(['# /usr/bin/id "x\\n"']);
 		const count = ticks;
-		await Bun.sleep(550);
+		expect(clock.count()).toBe(0);
+		clock.advance(5_000);
 		expect(ticks).toBe(count);
 		calls.start("cancelled");
 		const cancelled = { ...running, toolCallId: "cancelled" } as ToolRenderContext;
@@ -275,6 +281,9 @@ test("live title animates; cancellation and shutdown cannot restart a partial ti
 		calls.renderCall(args, theme, { ...running, toolCallId: "shutdown" });
 		calls.stopAll();
 		expect(calls.renderCall(args, theme, { ...running, toolCallId: "shutdown" }).render(120)).toEqual(['# /usr/bin/id "x\\n"']);
+		expect(clock.count()).toBe(0);
+		clock.advance(5_000);
+		expect(ticks).toBe(count);
 	} finally {
 		calls.stopAll();
 	}
