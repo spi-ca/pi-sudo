@@ -1,5 +1,11 @@
 # Changelog
 
+## v20261013-1
+
+- Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.2.0`으로 갱신하고 현재 graph의 `chord`를 제거했습니다.
+- 공개 questionnaire UI 의존성을 immutable `pi-ask-user#v20261013-1`로 동기화합니다. `/ui`만 사용하며 `sudo_exec`의 `model-only`·명시적 인증·승인·허가 철회·백엔드 고정 정책은 유지합니다.
+- 실제 OS sudo 인증은 오프라인 CI와 별도입니다.
+
 ## v20261010-1
 
 - 시스템 sudo AUTO 선택을 추가했습니다. `/usr/bin/sudo`를 우선하며 부재 시에만 `/usr/bin/sudo-rs`를 사용하고 PATH·alias 탐색이나 위험 경로의 대체는 하지 않습니다.
