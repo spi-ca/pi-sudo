@@ -1,5 +1,9 @@
 # Changelog
 
+## v20261016-1
+
+- Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.3.0`으로 갱신합니다. peer·immutable `pi-ask-user` Git ref·승인·인증·허가 철회·백엔드 고정 정책은 유지합니다.
+
 ## v20261013-1
 
 - Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.2.0`으로 갱신하고 현재 graph의 `chord`를 제거했습니다.
