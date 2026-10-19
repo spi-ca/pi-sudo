@@ -151,7 +151,7 @@ test("resizing recomputes preview and narrow overwide glyphs never overflow", ()
 
 test("generated outcome header is removed only with evidence; errors and warnings remain", () => {
 	const header = "exit=0, cancelled=false, timedOut=false, truncated=false\n";
-	expect(show(header + "hello", { code: 0, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("Completed · exit=0\n\nhello");
+	expect(show(header + "hello", { code: 0, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("✓ Completed · exit=0\n\nhello");
 	expect(show(header + "hello", null).join("\n")).toContain(header.trim());
 	expect(show("prefix " + header + "hello", { code: 0 }).join("\n")).toContain(header.trim());
 	expect(show(header + "hello", { code: 1 }).join("\n")).toContain(header.trim());
@@ -163,7 +163,7 @@ test("generated outcome header is removed only with evidence; errors and warning
 	for (const text of [collapsed, expanded]) {
 		expect(text).toContain("Error · exit=7");
 		expect(text).toContain(warning);
-		expect(text).toContain("[Output truncated during capture · expanding will not show missing output]");
+		expect(text).toContain("[⚠ Model output truncated · display tail may differ]");
 		expect(text).toContain(error.trim());
 	}
 	expect(collapsed).not.toContain("row 16\n");
@@ -178,14 +178,14 @@ test("generated outcome header is removed only with evidence; errors and warning
 
 test("state precedence, partial result, empty/unclassified content, and control safety", () => {
 	for (const [details, label] of [
-		[{ code: 0, cancelled: true }, "Cancelled"],
-		[{ code: 0, timedOut: true }, "Timed out"],
-		[{ code: 2 }, "Failed · exit=2"],
-		[null, "Result (status unknown)"],
+		[{ code: 0, cancelled: true }, "⚠ Cancelled"],
+		[{ code: 0, timedOut: true }, "⚠ Timed out"],
+		[{ code: 2 }, "✗ Failed · exit=2"],
+		[null, "? Result (status unknown)"],
 	] as const) expect(show("", details).join("\n")).toBe(label);
-	expect(show("", { code: 0 }, false, true).join("\n")).toBe("Error · exit=0");
+	expect(show("", { code: 0 }, false, true).join("\n")).toBe("✗ Error · exit=0");
 	const running = renderResult(result("Checking access and running command…"), { expanded: false, isPartial: true }, theme, context).render(80).join("\n");
-	expect(running).toBe("Running…");
+	expect(running).toBe("⏳ Checking access…");
 	expect(show("\x1b[2J\u202eTAIL", { code: 0 }, true).join("\n")).toContain("\\u001b[2J\\u202eTAIL");
 	const frozen = Object.freeze({ content: Object.freeze([Object.freeze({ type: "text", text: "one\ntwo" })]), details: Object.freeze({ code: 0 }) });
 	expect(renderResult(frozen as never, { expanded: true, isPartial: false }, theme, context).render(80).join("\n")).toContain("two");
@@ -199,10 +199,10 @@ test("partial output previews safely, expands captured text and warns about trun
 	expect(short).toContain("row 13");
 	expect(short).not.toContain("row 5\n");
 	expect(short).toContain("to expand");
-	expect(short).toContain("Output truncated during capture");
+	expect(short).toContain("Model output truncated");
 	expect(full).toContain("row 13\\u001b[2J\\u202e");
 	expect(full).not.toContain("\x1b");
-	expect(renderResult(result("secret", undefined), { expanded: true, isPartial: true }, theme, context).render(80)).toEqual(["Running…"]);
+	expect(renderResult(result("secret", undefined), { expanded: true, isPartial: true }, theme, context).render(80)).toEqual(["⏳ Checking access…"]);
 });
 
 test("call is limited by visual rows, not 240 characters, and explicit default cwd stays hidden", () => {
@@ -223,7 +223,7 @@ test("null exit headers distinguish timeout and cancellation without coercing to
 	const cancel = "exit=null, cancelled=true, timedOut=false, truncated=false\ninterrupted";
 	expect(show(cancel, null, false, true).join("\n")).toContain("Error · Cancelled\nexit=null, cancelled=true, timedOut=false, truncated=false\n\ninterrupted");
 	expect(show(cancel, { code: 0, cancelled: true, timedOut: false, truncated: false }).join("\n")).toContain("exit=null");
-	expect(show("exit=null, cancelled=false, timedOut=false, truncated=false\nunknown", { code: null, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("Result (status unknown)\n\nunknown");
+	expect(show("exit=null, cancelled=false, timedOut=false, truncated=false\nunknown", { code: null, cancelled: false, timedOut: false, truncated: false }).join("\n")).toBe("? Result (status unknown)\n\nunknown");
 });
 
 test("short call title and argv share a row", () => {
@@ -309,4 +309,60 @@ test("structured failures render ordered tails and keep cleanup warnings in both
 			}
 		}
 	}
+});
+
+test("unstructured errors pin their actual diagnostic above long output tails at every width", () => {
+	const text = "Error: transport failed\x1b[2J\u202e\n" + Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n");
+	const original = result(text);
+	for (const expanded of [false, true]) {
+		const component = renderResult(original, { expanded, isPartial: false }, theme, { ...context, isError: true });
+		for (const width of [1, 2, 12, 120]) {
+			const rows = component.render(width);
+			expect(rows.every(row => visibleWidth(row) <= width)).toBe(true);
+			const shown = rows.join("\n");
+			if (width === 120) {
+				expect(shown).toContain("✗ Error\nError: transport failed\\u001b[2J\\u202e");
+				expect(shown).toContain("row 29");
+				expect(shown.indexOf("transport failed")).toBeLessThan(shown.indexOf("row 29"));
+			}
+			expect(shown).not.toContain("\x1b");
+		}
+	}
+	expect(original.content[0]?.text).toBe(text);
+});
+
+test("model and display truncation warnings report only their own provenance", () => {
+	for (const isPartial of [false, true]) {
+		for (const truncated of [false, true]) {
+			for (const displayTruncated of [false, true]) {
+				styles.length = 0;
+				const original = result("retained", { code: 0, streaming: true, truncated, displayTruncated });
+				const component = renderResult(original, { expanded: false, isPartial }, theme, context);
+				const text = component.render(160).join("\n");
+				expect(text.includes("Model output truncated")).toBe(truncated);
+				expect(text.includes("Display output truncated during capture")).toBe(displayTruncated);
+				expect(text.includes("expanding will not show missing output")).toBe(displayTruncated);
+				for (const width of [1, 2, 12, 80])
+					for (const row of component.render(width)) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+				expect(styles.filter(({ text }) => text.includes("truncated")).every(({ color }) => color === "warning")).toBe(true);
+				expect(original.details).toEqual({ code: 0, streaming: true, truncated, displayTruncated });
+			}
+		}
+	}
+});
+
+test("result symbols complement semantic colors, while pre-admission cannot claim execution", () => {
+	for (const [details, error, prefix, color] of [
+		[{ code: 0 }, false, "✓ Completed", "success"],
+		[{ code: 7 }, true, "✗ Error", "error"],
+		[{ cancelled: true }, false, "⚠ Cancelled", "warning"],
+		[{ timedOut: true }, true, "✗ Error · Timed out", "error"],
+	] as const) {
+		styles.length = 0;
+		expect(show("", details, false, error).join("\n")).toStartWith(prefix);
+		expect(styles.some(style => style.color === color && style.text.startsWith(prefix))).toBe(true);
+	}
+	const pending = renderResult(result("Checking access and running command…"), { expanded: false, isPartial: true }, theme, context).render(80).join("\n");
+	expect(pending).toBe("⏳ Checking access…");
+	expect(pending).not.toContain("Running");
 });
