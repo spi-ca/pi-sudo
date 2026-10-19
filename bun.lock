@@ -5,7 +5,7 @@
     "": {
       "name": "pi-sudo",
       "dependencies": {
-        "pi-ask-user": "github:spi-ca/pi-ask-user#v20261013-1",
+        "pi-ask-user": "github:spi-ca/pi-ask-user#v20261019-1",
       },
       "devDependencies": {
         "@earendil-works/pi-ai": "1.3.0",
@@ -217,7 +217,7 @@
 
     "path-key": ["path-key@3.1.1", "", {}, "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q=="],
 
-    "pi-ask-user": ["pi-ask-user@github:spi-ca/pi-ask-user#aba4445", { "dependencies": { "@pi/presence": "github:spi-ca/pi-presence#v2-20261013-1" }, "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*", "typebox": "*" }, "optionalPeers": ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"] }, "spi-ca-pi-ask-user-aba4445", "sha512-v1RdKw/7LZq5wR4CFLEvJGSPvxgVbfbhNDs/dbwTl4Eo7FYwVDJo9Zmte5DfIXGPdnwWyPfgMHKlJeyA0UjL+Q=="],
+    "pi-ask-user": ["pi-ask-user@github:spi-ca/pi-ask-user#7980348", { "dependencies": { "@pi/presence": "github:spi-ca/pi-presence#v2-20261013-1" }, "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*", "typebox": "*" }, "optionalPeers": ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"] }, "spi-ca-pi-ask-user-7980348", "sha512-3teVwS169exo6gi1ULt+Tc8GOV+gZByWRE/x6wkS+qVo7oZucsB6XYifOqDzSruiSSuubR+1aBbKd14Qtz8GRA=="],
 
     "proper-lockfile": ["proper-lockfile@4.1.2", "", { "dependencies": { "graceful-fs": "^4.2.4", "retry": "^0.12.0", "signal-exit": "^3.0.2" } }, "sha512-TjNPblN4BwAWMXU8s9AEz4JmQxnD1NNL7bNOY/AKUzyamc379FWASUhc/K1pL2noVb+XmZKLL68cjzLsiOAMaA=="],
 

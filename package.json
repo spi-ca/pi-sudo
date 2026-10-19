@@ -34,7 +34,7 @@
 		"typescript": "5.9.3"
 	},
 	"dependencies": {
-		"pi-ask-user": "github:spi-ca/pi-ask-user#v20261013-1"
+		"pi-ask-user": "github:spi-ca/pi-ask-user#v20261019-1"
 	},
 	"scripts": {
 		"test": "bun test",
