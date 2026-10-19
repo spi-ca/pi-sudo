@@ -11,7 +11,7 @@ import { trustedAskpass } from "./src/askpass.js";
 import { boundedError, boundedText, formatOutcome } from "./src/output.js";
 import { runProcess, sudoBackend, type Runner, type SudoBackend } from "./src/process.js";
 import { SudoAccess, validMinutes, type Clock, type ReauthTicket } from "./src/sudo.js";
-import { createCallRenderer, renderResult, type CallClock } from "./src/render.js";
+import { createCallRenderer, renderResult, safeText, type CallClock } from "./src/render.js";
 
 const approvalWarnings = [
 	"• The model can run any sudo-policy command without asking again. Use sudo_exec, not bash.",
@@ -198,15 +198,15 @@ export default function sudoExtension(
 		let color: "warning" | "error" = "warning";
 		if (remaining > 0) {
 			const seconds = Math.ceil(remaining / 1000);
-			label = `⚡ sudo ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+			label = `⚡ sudo · unlocked ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 			color = "warning";
 			refreshTimer = statusTimer.setTimeout(updateStatus, Math.min(1000, remaining));
 			refreshTimer.unref?.();
 		} else if (cacheWarning) {
-			label = "⚠️ sudo";
+			label = "⚠ sudo · cache uncertain";
 			color = "error";
 		} else if (pending && pending.epoch === authorizationEpoch) {
-			label = "⏳ sudo";
+			label = `⏳ sudo · ${pending.phase}`;
 			color = "warning";
 		}
 		if (label === undefined) {
@@ -216,7 +216,7 @@ export default function sudoExtension(
 		const displayLabel = remaining > 0 && remaining <= 30_000 ? ui.theme.bold(label) : label;
 		ui.setStatus("pi-sudo", ui.theme.fg(color, displayLabel));
 	}
-	let pending: { epoch: number; abort: AbortController } | undefined;
+	let pending: { epoch: number; abort: AbortController; phase: string } | undefined;
 	// Cleanup ownership, not authorization: only SudoAccess can admit an execution.
 	let touched = false;
 	// Fence UI awaits before unlock starts; SudoAccess.generation fences the later auth awaits.
@@ -249,7 +249,7 @@ export default function sudoExtension(
 			cacheWarning = true;
 			updateStatus();
 			if (!closed) ui?.notify(
-				boundedError(`sudo expiry invalidation failed: ${String(error)}`),
+				boundedError(safeText(`✗ sudo · Expired; cache cleanup failed\n${String(error)}`)),
 				"error",
 			);
 		},
@@ -263,18 +263,27 @@ export default function sudoExtension(
 
 	pi.registerCommand("sudo", {
 		description:
-			"Explicit sudo unlock [1–180 minutes], reauth, lock, or status (interactive terminal only)",
+			"Sudo unlock [1–180 minutes], reauth, lock, status, or help (unlock/reauth require TUI + TTY)",
 		handler: async (raw, ctx) => {
 			if (!closed) ui = ctx.ui;
 			const parts = raw.trim().split(/\s+/);
 			try {
-				if (parts[0] === "status" && parts.length === 1) {
+				if ((parts[0] === "" || parts[0] === "help") && parts.length === 1) {
+					ctx.ui.notify(
+						"sudo · Help\n/sudo unlock [1–180 minutes] (default 5) | /sudo reauth | /sudo lock | /sudo status\nUnlock requires TUI + real TTY. SUDO_ASKPASS selects OS askpass automatically. Reauth keeps the original deadline. Ordinary bash is not elevated.",
+						"info",
+					);
+				} else if (parts[0] === "status" && parts.length === 1) {
 					const remaining = access.remainingMs();
 					ctx.ui.notify(
 						remaining
-							? `sudo_exec: up to ${Math.ceil(remaining / 1000)}s left; OS sudo credentials may expire sooner (ordinary bash is not elevated)`
-							: "sudo locked",
-						"info",
+							? `⚡ sudo_exec · Unlocked · up to ${Math.ceil(remaining / 1000)}s left; OS sudo credentials may expire sooner (ordinary bash is not elevated)`
+							: cacheWarning
+								? "⚠ sudo · Locked; OS credential cache may remain valid. /sudo lock retries cleanup."
+								: pending && pending.epoch === authorizationEpoch
+									? `⏳ sudo · ${pending.phase}; sudo_exec is locked`
+									: "sudo · Locked",
+						cacheWarning ? "warning" : "info",
 					);
 				} else if (parts[0] === "lock" && parts.length === 1) {
 					authorizationEpoch++;
@@ -291,7 +300,7 @@ export default function sudoExtension(
 					updateStatus();
 					touched = false;
 					ctx.ui.notify(
-						"sudo locked; current sudo timestamp invalidated",
+						"✓ sudo · Locked; current sudo timestamp invalidated (shared cache may be repopulated)",
 						"info",
 					);
 				} else if (
@@ -317,7 +326,7 @@ export default function sudoExtension(
 					if (!reauth && access.remainingMs() > 0) throw new Error("Already unlocked; lock first (no automatic renewal)");
 					// SudoAccess captures both deadlines and revokes before any UI await.
 					const ticket: ReauthTicket | undefined = reauth ? access.beginReauth() : undefined;
-					const attempt = { epoch: authorizationEpoch, abort: new AbortController() };
+					const attempt = { epoch: authorizationEpoch, abort: new AbortController(), phase: "confirmation" };
 					pending = attempt;
 					const epoch = attempt.epoch;
 					updateStatus();
@@ -328,19 +337,27 @@ export default function sudoExtension(
 						const helper = selectedAskpass === undefined ? undefined : resolveAskpass(selectedAskpass);
 						if (epoch !== authorizationEpoch || closed)
 							throw new Error("Unlock was revoked");
-						const displayHelper = helper?.replace(/[\x00-\x1f\x7f-\x9f]/g, (char) =>
+						const displayHelper = helper && safeText(helper.replace(/[\x00-\x1f\x7f-\x9f]/g, (char) =>
 							`\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
-						);
+						));
 						const approved = await approveUnlock(
 							ctx.ui, reauth ? Math.ceil(access.reauthRemainingMs(ticket!) / 60_000) : minutes,
 							displayHelper ? `OS askpass (${displayHelper})` : "terminal", reauth, attempt.abort.signal,
 						);
-						if (!approved) return;
+						if (!approved) {
+							if (epoch === authorizationEpoch && !closed && !attempt.abort.signal.aborted)
+								ctx.ui.notify(`sudo · ${reauth ? "Reauthentication" : "Unlock"} declined; access remains locked`, "info");
+							return;
+						}
+						attempt.phase = "waiting for idle";
+						updateStatus();
 						// Consent is shown during the agent turn, but sudo must not take
 						// the terminal (or start askpass) until the turn has settled.
 						await waitForIdleOrRevoked(() => ctx.waitForIdle(), attempt.abort.signal);
 						if (epoch !== authorizationEpoch || closed || attempt.abort.signal.aborted)
 							throw new Error("Unlock was revoked");
+						attempt.phase = `authenticating · ${helper ? "askpass" : "terminal"}`;
+						updateStatus();
 						// No password enters Pi input dialogs, tools, pipes, transcripts or model context.
 						const authenticate = () => {
 							touched = true;
@@ -419,7 +436,7 @@ export default function sudoExtension(
 							cacheWarning = false;
 							updateStatus();
 							ctx.ui.notify(
-								"sudo_exec is ready. /sudo status shows the remaining window; OS sudo credentials may expire sooner. /sudo lock ends access.",
+								`✓ sudo_exec · Ready${reauth ? " · original deadline unchanged" : ""}. /sudo status shows the remaining window; OS sudo credentials may expire sooner. /sudo lock ends access.`,
 								"info",
 							);
 						}
@@ -442,7 +459,7 @@ export default function sudoExtension(
 			} catch (error) {
 				if (cleanupFailed(error)) cacheWarning = true;
 				updateStatus();
-				ctx.ui.notify(boundedError(error), "error");
+				ctx.ui.notify(boundedError(safeText(`✗ sudo · Request failed\n${String(error)}`)), "error");
 			}
 		},
 	});
@@ -564,7 +581,7 @@ export default function sudoExtension(
 			} catch (error) {
 				cacheWarning = true;
 				ctx.ui.notify(
-					boundedError(`sudo lock failed: ${String(error)}`),
+					boundedError(safeText(`✗ sudo · Shutdown cleanup failed\n${String(error)}`)),
 					"error",
 				);
 			}

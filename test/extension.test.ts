@@ -59,6 +59,7 @@ function fixture(
 	const calls: Invocation[] = [];
 	const events: string[] = [];
 	const messages: string[] = [];
+	const notices: { message: string; type: string }[] = [];
 	const warnings: string[] = [];
 	const approvalScreens: string[][] = [];
 	const approvalFrames: string[][] = [];
@@ -114,8 +115,9 @@ function fixture(
 				fg: (color: string, text: string) => JSON.stringify({ color, text }),
 				bold: (text: string) => { boldLabels.push(text); return text; },
 			},
-			notify: (message: string) => {
+			notify: (message: string, type: string) => {
 				messages.push(message);
+				notices.push({ message, type });
 			},
 			setStatus: (_key: string, text: string | undefined) => {
 				statuses.push(text === undefined ? { color: "clear", text: "" } : JSON.parse(text));
@@ -211,6 +213,7 @@ function fixture(
 		calls,
 		events,
 		messages,
+		notices,
 		warnings,
 		approvalScreens,
 		approvalFrames,
@@ -323,9 +326,9 @@ test("real regular/fullscreen TUI handoff keeps regular scrollback and fullscree
 				expect(handoff).toContain("\x1b[?1049l");
 				expect(handoff).not.toContain("TRANSCRIPT-CANARY");
 			}
-			if (outcome === "success") expect(f.messages.at(-1)).toContain("sudo_exec is ready");
+			if (outcome === "success") expect(f.messages.at(-1)).toContain("sudo_exec · Ready");
 			else {
-				expect(f.messages.at(-1)).not.toContain("sudo_exec is ready");
+				expect(f.messages.at(-1)).not.toContain("sudo_exec · Ready");
 				await expect(f.exec()).rejects.toThrow("locked");
 			}
 			await f.shutdown();
@@ -350,10 +353,10 @@ test("OS SIGINT to Pi during non-detached auth cancels the child, restores TUI a
 		expect(childResult?.cancelled).toBe(true);
 		expect(f.calls.map(call => call.args)).toContainEqual(["-v"]);
 		expect(f.events.at(-1)).toBe("start");
-		expect(f.messages.at(-1)).not.toContain("sudo_exec is ready");
+		expect(f.messages.at(-1)).not.toContain("sudo_exec · Ready");
 		await expect(f.exec()).rejects.toThrow("locked");
 		await f.command("status");
-		expect(f.messages.at(-1)).toBe("sudo locked");
+		expect(f.messages.at(-1)).toBe("sudo · Locked");
 	} finally {
 		expect(process.listenerCount("SIGINT")).toBe(listeners);
 	}
@@ -372,7 +375,7 @@ test("SIGINT in initial invalidation or probe also fails closed and removes hand
 		} });
 		await f.command("unlock");
 		expect(f.events.at(-1)).toBe("start");
-		expect(f.messages.at(-1)).not.toContain("sudo_exec is ready");
+		expect(f.messages.at(-1)).not.toContain("sudo_exec · Ready");
 		await expect(f.exec()).rejects.toThrow("locked");
 		expect(process.listenerCount("SIGINT")).toBe(before);
 	}
@@ -496,7 +499,7 @@ test("shared UI mouse approvals obey the same visibility gate and cancellation r
 		try {
 			await f.command("unlock");
 			expect(f.calls.some(call => call.args[0] === "-v")).toBe(!clipped);
-			if (clipped) expect(f.messages.at(-1)).toContain("consent is clipped");
+			if (clipped) expect(f.messages.some(message => message.includes("consent is clipped"))).toBe(true);
 		} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
 	}
 });
@@ -505,7 +508,7 @@ test("invalidated frame cannot approve before a fresh render", async () => {
 	const f = fixture({ invalidateApprovalBeforeInput: true, approvalKeys: ["2", "\u001b"] });
 	await f.command("unlock");
 	expect(f.calls).toHaveLength(0);
-	expect(f.messages.at(-1)).toContain("consent is clipped");
+	expect(f.messages.some(message => message.includes("consent is clipped"))).toBe(true);
 });
 
 test("installed Pi select bindings navigate and confirm YES", async () => {
@@ -535,7 +538,7 @@ test("real fullscreen dock admits visible consent but rejects consent clipped by
 			if (footerRows === 2) expect(f.calls[1]?.args).toEqual(["-v"]);
 			else {
 				expect(f.calls).toHaveLength(0);
-				expect(f.messages.at(-1)).toContain("consent is clipped");
+				expect(f.messages.some(message => message.includes("consent is clipped"))).toBe(true);
 			}
 		} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
 	}
@@ -554,7 +557,7 @@ test("below-editor widgets cannot push consent disclosures off-screen in either 
 				if (belowWidgetRows === 0) expect(f.calls[1]?.args).toEqual(["-v"]);
 				else {
 					expect(f.calls).toHaveLength(0);
-					expect(f.messages.at(-1)).toContain("consent is clipped");
+					expect(f.messages.some(message => message.includes("consent is clipped"))).toBe(true);
 				}
 			} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
 		}
@@ -593,7 +596,7 @@ test("non-TUI and non-TTY unlock fail before any sudo; locked tools fail", async
 		await f.command("unlock 1");
 		expect(f.messages.at(-1)).toContain("TUI");
 		await f.command("status");
-		expect(f.messages.at(-1)).toBe("sudo locked");
+		expect(f.messages.at(-1)).toBe("sudo · Locked");
 		await expect(f.exec()).rejects.toThrow("locked");
 		await f.shutdown();
 		expect(f.calls).toHaveLength(0);
@@ -610,7 +613,7 @@ test("confirmation, TUI restore, current cwd, shutdown and idempotent cleanup", 
 		["-v"],
 		["-n", "--", "/usr/bin/true"],
 	]);
-	expect(f.messages.at(-1)).toContain("sudo_exec is ready");
+	expect(f.messages.at(-1)).toContain("sudo_exec · Ready");
 	const progress: unknown[] = [];
 	await f.exec(undefined, (update) => progress.push(update.content));
 	expect(progress).toEqual([[{ type: "text", text: "Checking access and running command…" }]]);
@@ -857,10 +860,10 @@ test("completed nonzero tool outcome remains a Pi tool error without revoking or
 	expect(updates).toHaveLength(2);
 	expect(updates[1]).toMatchObject({ content: [{ text: "denied" }] });
 	expect(f.calls.filter(call => call.args[0] === "-k")).toHaveLength(1);
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 0:50");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 0:50");
 	await f.exec();
 	expect(executions).toBe(2);
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 0:50");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 0:50");
 	await f.shutdown();
 });
 
@@ -887,12 +890,15 @@ test("configured askpass is automatic for both backends, stays in TUI, and uses 
 	}
 });
 
-test("askpass helper control characters are escaped in the approval screen", async () => {
-	const f = fixture({ askpass: () => "/trusted/helper\u001b[2J", resolveAskpass: (value) => value! });
+test("askpass helper controls and bidi are escaped only in the approval screen", async () => {
+	const helper = "/trusted/helper\u001b[2J\u202e\n";
+	const f = fixture({ askpass: () => helper, resolveAskpass: (value) => value! });
 	await f.command("unlock 1");
-	expect(f.warnings[0]).toContain("/trusted/helper\\u001b[2J");
+	expect(f.warnings[0]).toContain("/trusted/helper\\u001b[2J\\u202e\\u000a");
 	expect(f.warnings[0]).not.toContain("\u001b");
-	expect(f.calls[1]?.askpass).toBe("/trusted/helper\u001b[2J");
+	expect(f.warnings[0]).not.toContain("\u202e");
+	expect(f.calls[1]?.askpass).toBe(helper);
+	await f.shutdown();
 });
 
 test("retained --askpass alias requires SUDO_ASKPASS without terminal fallback", async () => {
@@ -1066,7 +1072,7 @@ test("locked status stays hidden, pending is not a grant, duplicate unlock canno
 	expect(f.statuses.at(-1)).toEqual({ color: "clear", text: "" });
 	const pending = f.command("unlock 1");
 	await Promise.resolve();
-	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⏳ sudo" });
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⏳ sudo · confirmation" });
 	release(false);
 	await pending;
 	expect(f.statuses.at(-1)?.text).toBe("");
@@ -1074,18 +1080,18 @@ test("locked status stays hidden, pending is not a grant, duplicate unlock canno
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	release(true);
 	await unlock;
-	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo 1:00" });
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo · unlocked 1:00" });
 	const count = f.calls.length;
 	await f.command("unlock 1");
 	expect(f.messages.at(-1)).toContain("Already unlocked");
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 1:00");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 1:00");
 	expect(f.calls).toHaveLength(count);
 	clock.advance(29_000);
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 0:31");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 0:31");
 	clock.advance(1_000);
-	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo 0:30" });
-	expect(f.boldLabels.at(-1)).toBe("⚡ sudo 0:30");
+	expect(f.statuses.at(-1)).toEqual({ color: "warning", text: "⚡ sudo · unlocked 0:30" });
+	expect(f.boldLabels.at(-1)).toBe("⚡ sudo · unlocked 0:30");
 	expect(f.calls).toHaveLength(count);
 	await f.command("lock");
 	expect(f.statuses.at(-1)?.text).toBe("");
@@ -1102,7 +1108,7 @@ test("revocation and shutdown fence pending UI and leave no refresh", async () =
 		f.startup();
 		const unlock = f.command("unlock");
 		await Promise.resolve();
-		expect(f.statuses.at(-1)?.text).toBe("⏳ sudo");
+		expect(f.statuses.at(-1)?.text).toBe("⏳ sudo · confirmation");
 		await (transition === "lock" ? f.command("lock") : f.shutdown());
 		release(true);
 		await unlock;
@@ -1124,9 +1130,9 @@ test("cache cleanup warning persists through status until successful lock", asyn
 	expect(result).toMatchObject({ isError: true, details: { code: null, timedOut: true } });
 	expect(result.content[0]).toMatchObject({ text: expect.stringContaining("cleanup failed") });
 	await expect(f.exec()).rejects.toThrow("locked");
-	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠ sudo · cache uncertain" });
 	await f.command("status");
-	expect(f.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	expect(f.statuses.at(-1)?.text).toBe("⚠ sudo · cache uncertain");
 	await f.command("lock");
 	expect(f.statuses.at(-1)).toEqual({ color: "clear", text: "" });
 	await f.shutdown();
@@ -1141,8 +1147,8 @@ test("expiry stops lightning and failed expiry invalidation shows warning", asyn
 	await f.command("unlock 1");
 	clock.advance(60_000);
 	await new Promise((resolve) => setTimeout(resolve, 0));
-	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
-	expect(f.statuses.some(({ text }) => text === "⚡ sudo 0:00")).toBe(false);
+	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠ sudo · cache uncertain" });
+	expect(f.statuses.some(({ text }) => text === "⚡ sudo · unlocked 0:00")).toBe(false);
 	expect(clock.count()).toBe(0);
 	await f.shutdown();
 });
@@ -1154,9 +1160,9 @@ test("failed unlock cleanup and lock/host invalidation expose cache warning, not
 	} });
 	failedAuth.startup();
 	await failedAuth.command("unlock");
-	expect(failedAuth.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	expect(failedAuth.statuses.at(-1)).toEqual({ color: "error", text: "⚠ sudo · cache uncertain" });
 	await failedAuth.command("status");
-	expect(failedAuth.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	expect(failedAuth.statuses.at(-1)?.text).toBe("⚠ sudo · cache uncertain");
 	await failedAuth.shutdown();
 
 	let hostValid = true;
@@ -1165,7 +1171,7 @@ test("failed unlock cleanup and lock/host invalidation expose cache warning, not
 	await host.command("unlock");
 	hostValid = false;
 	await host.command("lock");
-	expect(host.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	expect(host.statuses.at(-1)).toEqual({ color: "error", text: "⚠ sudo · cache uncertain" });
 	await host.shutdown();
 });
 
@@ -1179,7 +1185,7 @@ test("thrown execution cleanup error shows warning and no lingering grant", asyn
 	f.startup();
 	await f.command("unlock");
 	await expect(f.exec()).rejects.toThrow("cleanup failed");
-	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+	expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠ sudo · cache uncertain" });
 	await f.shutdown();
 });
 
@@ -1187,7 +1193,7 @@ test("initial invalidation spawn failure and restoration cleanup failure warn", 
 	const initial = fixture({ run: async () => { throw Error("spawn failure"); } });
 	initial.startup();
 	await initial.command("unlock");
-	expect(initial.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	expect(initial.statuses.at(-1)?.text).toBe("⚠ sudo · cache uncertain");
 	await initial.shutdown();
 	let invalidations = 0;
 	const restore = fixture({ restoreFails: true, run: async (call) => {
@@ -1196,7 +1202,7 @@ test("initial invalidation spawn failure and restoration cleanup failure warn", 
 	} });
 	restore.startup();
 	await restore.command("unlock");
-	expect(restore.statuses.at(-1)?.text).toBe("⚠️ sudo");
+	expect(restore.statuses.at(-1)?.text).toBe("⚠ sudo · cache uncertain");
 	expect(restore.messages.at(-1)).toContain("cleanup spawn failure");
 	await restore.shutdown();
 });
@@ -1290,7 +1296,7 @@ test("reauth revokes before confirmation, keeps original window across confirmat
 	approve(true);
 	await pending;
 	expect(f.calls.filter(call => call.args[0] === "-v")).toHaveLength(2);
-	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 0:35");
+	expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 0:35");
 	clock.advance(35_000);
 	await new Promise(resolve => setTimeout(resolve, 0));
 	await expect(f.exec()).rejects.toThrow("locked");
@@ -1341,13 +1347,13 @@ test("lock and shutdown while reauth waits for idle clear pending without revivi
 		if (transition === "lock") {
 			await f.command("unlock 1"); // the revoked reauth no longer owns pending
 			expect(f.calls.filter(call => call.args[0] === "-A")).toHaveLength(2);
-			expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+			expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 1:00");
 		}
 		releaseIdle();
 		await Promise.resolve();
 		expect(f.calls.filter(call => call.args[0] === "-A")).toHaveLength(transition === "lock" ? 2 : 1);
 		if (transition === "lock") {
-			expect(f.statuses.at(-1)?.text).toBe("⚡ sudo 1:00");
+			expect(f.statuses.at(-1)?.text).toBe("⚡ sudo · unlocked 1:00");
 			clock.advance(60_000);
 			await new Promise(resolve => setTimeout(resolve, 0));
 			await expect(f.exec()).rejects.toThrow("locked");
@@ -1506,9 +1512,9 @@ test("reauth backend rejection revokes access and preserves residual-cache warni
 			expect(f.messages.at(-1)).toContain("credential cache may remain valid");
 			expect(f.messages.at(-1)).toContain("explicit /sudo unlock");
 			await expect(f.exec()).rejects.toThrow("locked");
-			expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+			expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠ sudo · cache uncertain" });
 			await f.command("status");
-			expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠️ sudo" });
+			expect(f.statuses.at(-1)).toEqual({ color: "error", text: "⚠ sudo · cache uncertain" });
 			expect(f.calls).toHaveLength(3);
 		} finally {
 			await f.shutdown();
@@ -1527,8 +1533,71 @@ test("backend selection is lazy; an identity change revokes adapter access witho
 	await f.command("unlock 1"); identity = "replaced";
 	await expect(f.exec()).rejects.toThrow("explicit /sudo unlock");
 	expect(f.calls).toHaveLength(3);
-	await f.command("status"); expect(f.messages.at(-1)).toBe("sudo locked");
+	await f.command("status"); expect(f.messages.at(-1)).toContain("OS credential cache may remain valid");
 	await f.command("unlock 1");
-	expect(f.messages.at(-1)).toContain("sudo_exec is ready");
+	expect(f.messages.at(-1)).toContain("sudo_exec · Ready");
+	await f.shutdown();
+});
+
+test("help is read-only, status names pending phases and auth method without granting access", async () => {
+	for (const askpass of [undefined, "/trusted/helper"]) {
+		let releaseIdle!: () => void;
+		let releaseAuth!: () => void;
+		const f = fixture({ askpass: () => askpass,
+			waitForIdle: () => new Promise(resolve => { releaseIdle = resolve; }),
+			run: async call => {
+				if (call.args.includes("-v")) await new Promise<void>(resolve => { releaseAuth = resolve; });
+				return ok;
+			} });
+		for (const command of ["", "help"]) {
+			await f.command(command);
+			expect(f.notices.at(-1)).toMatchObject({ type: "info", message: expect.stringContaining("sudo · Help") });
+			expect(f.messages.at(-1)).toContain("default 5");
+			expect(f.messages.at(-1)).toContain("SUDO_ASKPASS");
+		}
+		expect(f.calls).toHaveLength(0);
+		expect(f.warnings).toHaveLength(0);
+		const pending = f.command("unlock 1");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(f.statuses.at(-1)?.text).toBe("⏳ sudo · waiting for idle");
+		await f.command("status");
+		expect(f.messages.at(-1)).toBe("⏳ sudo · waiting for idle; sudo_exec is locked");
+		expect(f.calls).toHaveLength(0);
+		releaseIdle();
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(f.statuses.at(-1)?.text).toBe(`⏳ sudo · authenticating · ${askpass ? "askpass" : "terminal"}`);
+		await expect(f.exec()).rejects.toThrow("locked");
+		releaseAuth();
+		await pending;
+		expect(f.messages.at(-1)).toContain("✓ sudo_exec · Ready");
+		await f.shutdown();
+	}
+});
+
+test("notices keep cache uncertainty, raw failure evidence and safe terminal text distinct", async () => {
+	const f = fixture({ host: () => { throw new Error("host unavailable\x1b[2J\u202e"); } });
+	await f.command("unlock");
+	expect(f.notices.at(-1)?.type).toBe("error");
+	expect(f.messages.at(-1)).toContain("✗ sudo · Request failed\nError: host unavailable\\u001b[2J\\u202e");
+	expect(f.messages.at(-1)).not.toContain("\x1b");
+	expect(f.calls).toHaveLength(0);
+	const cache = fixture({ run: async () => ({ ...ok, code: 1 }) });
+	await cache.command("lock");
+	await cache.command("status");
+	expect(cache.notices.at(-1)).toMatchObject({ type: "warning", message: expect.stringContaining("OS credential cache may remain valid") });
+	expect(cache.messages.at(-1)).toContain("/sudo lock");
+	await cache.shutdown();
+});
+
+test("declined reauth reports locked access; successful reauth names unchanged deadline", async () => {
+	let approve = true;
+	const f = fixture({ confirm: async () => approve });
+	await f.command("unlock 1");
+	await f.command("reauth");
+	expect(f.messages.at(-1)).toContain("original deadline unchanged");
+	approve = false;
+	await f.command("reauth");
+	expect(f.messages.at(-1)).toBe("sudo · Reauthentication declined; access remains locked");
+	await expect(f.exec()).rejects.toThrow("locked");
 	await f.shutdown();
 });

@@ -71,7 +71,7 @@ const CLEANUP_WARNING = "sudo -k cleanup failed; credential cache may remain val
 const OUTCOME_HEADER = /^(?:Error: )?exit=(-?\d+|null), cancelled=(true|false), timedOut=(true|false), truncated=(true|false)\n/;
 
 // Untrusted argv/output must not issue terminal commands or reorder visible text.
-function safeText(text: string): string {
+export function safeText(text: string): string {
 	return text.replace(
 		/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]/g,
 		(char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
@@ -247,14 +247,21 @@ function outcomeBody(text: string, details: ResultDetails | undefined, isError: 
 
 function resultStatus(isError: boolean, cancelled: boolean, timedOut: boolean, code: number | null | undefined): string {
 	if (isError) {
-		if (cancelled) return "Error · Cancelled";
-		if (timedOut) return "Error · Timed out";
-		return code == null ? "Error" : `Error · exit=${code}`;
+		if (cancelled) return "✗ Error · Cancelled";
+		if (timedOut) return "✗ Error · Timed out";
+		return code == null ? "✗ Error" : `✗ Error · exit=${code}`;
 	}
-	if (cancelled) return "Cancelled";
-	if (timedOut) return "Timed out";
-	if (code == null) return "Result (status unknown)";
-	return code === 0 ? "Completed · exit=0" : `Failed · exit=${code}`;
+	if (cancelled) return "⚠ Cancelled";
+	if (timedOut) return "⚠ Timed out";
+	if (code == null) return "? Result (status unknown)";
+	return code === 0 ? "✓ Completed · exit=0" : `✗ Failed · exit=${code}`;
+}
+
+function truncationNotices(modelTruncated: boolean, displayTruncated: boolean, theme: Theme): string[] {
+	return [
+		...(modelTruncated ? [theme.fg("warning", "[⚠ Model output truncated · display tail may differ]")] : []),
+		...(displayTruncated ? [theme.fg("warning", "[⚠ Display output truncated during capture · expanding will not show missing output]")] : []),
+	];
 }
 
 export function renderResult(
@@ -269,10 +276,11 @@ export function renderResult(
 			? details.displayOutput ?? result.content.filter((item) => item.type === "text" && typeof item.text === "string")
 				.map((item) => item.text).join("\n")
 			: "";
-		const footers = details?.streaming && (details.truncated || details.displayTruncated)
-			? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")]
+		const footers = details?.streaming
+			? truncationNotices(details.truncated === true, details.displayTruncated === true, theme)
 			: [];
-		return display([theme.fg("warning", "Running…"), ...(text ? [""] : [])],
+		const status = details?.streaming === true ? "⏳ Running…" : "⏳ Checking access…";
+		return display([theme.fg("warning", status), ...(text ? [""] : [])],
 			text ? outputLines(text).map((line) => theme.fg("toolOutput", line)) : [],
 			footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
 	}
@@ -303,8 +311,15 @@ export function renderResult(
 	if (context.isError && matched && details?.code === undefined && details?.cancelled === undefined &&
 		details?.timedOut === undefined && details?.truncated === undefined)
 		header.push(theme.fg("muted", safeText(matched[0].trimEnd())));
-	if (cleanup) header.push(theme.fg("warning", CLEANUP_WARNING));
-	const footers = parsed.truncated || details?.displayTruncated ? [theme.fg("warning", "[Output truncated during capture · expanding will not show missing output]")] : [];
+	if (cleanup) header.push(theme.fg("warning", `⚠ ${CLEANUP_WARNING}`));
+	const footers = truncationNotices(parsed.truncated, details?.displayTruncated === true, theme);
 	if (details?.displayOutput !== undefined) body = details.displayOutput;
+	// A transport/admission error has no structured outcome. Keep its actual
+	// diagnostic above the tail preview rather than hiding it behind long output.
+	if (context.isError && !matched && details?.code === undefined && body) {
+		const lines = outputLines(body);
+		header.push(theme.fg("error", lines.shift() ?? ""));
+		body = lines.join("\n");
+	}
 	return display(body ? [...header, ""] : header, body ? outputLines(body).map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
 }
