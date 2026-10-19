@@ -26,8 +26,24 @@ jobs:
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        id: setup_bun
         with:
-          bun-version: 1.4.2
+          bun-version: latest
+      - name: Verify resolved Bun version and minimum
+        env:
+          EXPECTED_BUN_VERSION: ${{ steps.setup_bun.outputs.bun-version }}
+        run: |
+          bun -e '
+            const actual = Bun.version;
+            const expected = process.env.EXPECTED_BUN_VERSION;
+            if (!expected || actual !== expected) {
+              throw new Error(`Bun version mismatch: expected ${expected}, running ${actual}`);
+            }
+            if (!Bun.semver.satisfies(actual, ">=1.4.2")) {
+              throw new Error(`Bun ${actual} is below the required minimum 1.4.2`);
+            }
+            console.log(`Verified Bun ${actual} (minimum 1.4.2)`);
+          '
       - name: Install locked dependencies
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Verify exact Pi runtime graph

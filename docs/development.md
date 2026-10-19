@@ -2,7 +2,7 @@
 
 ## 로컬 확인
 
-`package.json`은 `private: true`, `pi.extensions: ["./index.ts"]`, Bun 테스트, TypeScript `noEmit` 검사와 문서 다이어그램 동기화 명령을 정의합니다. Pi 개발 의존성 `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`는 모두 정확히 `1.3.0`입니다. 기존 lockfile을 유지하며 의존성을 준비할 때:
+`package.json`은 `private: true`, `pi.extensions: ["./index.ts"]`, Bun 테스트, TypeScript `noEmit` 검사와 문서 다이어그램 동기화 명령을 정의합니다. Bun의 현재 최소 버전은 `engines.bun: ">=1.4.2"`로 선언하며, 앞으로도 기본적으로 최신 안정 버전을 사용합니다. Bun 버전을 고정하는 `packageManager` 항목은 두지 않습니다. Pi 개발 의존성 `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`는 모두 정확히 `1.3.0`입니다. 기존 lockfile을 유지하며 의존성을 준비할 때:
 
 ```bash
 bun install --frozen-lockfile
@@ -15,7 +15,7 @@ bun run docs:check
 
 ## GitHub Actions CI
 
-[CI 워크플로](../.github/workflows/ci.yml)는 PR, `main` push, `v*` 태그 push 및 수동 실행을 지원합니다. Ubuntu에서 Bun `1.4.2`와 frozen lockfile을 사용해 Pi 1.2에서 제거된 `chord` 없이 일곱 Pi runtime 패키지의 exact `1.3.0` graph, 타입 검사·전체 테스트·다이어그램 Markdown 동기화를 확인하고, 추적 파일 변경이 없는지 검사합니다. Actions는 커밋 SHA로 고정하며 토큰은 `contents: read`, 체크아웃 인증 정보는 유지하지 않습니다. 의존성 설치 스크립트도 실행하지 않습니다.
+[CI 워크플로](../.github/workflows/ci.yml)는 PR, `main` push, `v*` 태그 push 및 수동 실행을 지원합니다. Ubuntu에서 `setup-bun`의 `bun-version: latest`로 최신 안정 Bun을 선택합니다. 의존성 설치 전에 실제 `Bun.version`이 `steps.setup_bun.outputs.bun-version`과 일치하고 `Bun.semver`로 현재 최소 `1.4.2` 이상인지 확인합니다. frozen lockfile을 사용해 Pi 1.2에서 제거된 `chord` 없이 일곱 Pi runtime 패키지의 exact `1.3.0` graph, 타입 검사·전체 테스트·다이어그램 Markdown 동기화를 확인하고, 추적 파일 변경이 없는지 검사합니다. Actions는 커밋 SHA로 고정하며 토큰은 `contents: read`, 체크아웃 인증 정보는 유지하지 않습니다. 의존성 설치 스크립트도 실행하지 않습니다.
 
 실제 sudo 인증·GUI askpass·macOS 인증 및 Podman 이미지 재렌더링은 CI 범위가 아닙니다. 다이어그램 검사는 `.mmd`와 Markdown의 일치만 확인합니다. CI 성공을 실제 관리자 인증이나 이미지 최신성 검증으로 해석하지 마세요.
 
