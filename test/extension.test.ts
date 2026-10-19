@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -14,6 +15,7 @@ import type { Clock } from "../src/sudo.js";
 import { Container, CURSOR_MARKER, TuiMainScreen, TuiAltScreen, getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import type { Terminal, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { createChatViewport } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/chat-viewport.js";
+import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 
 
 const ok: Outcome = {
@@ -63,6 +65,7 @@ function fixture(
 	const warnings: string[] = [];
 	const approvalScreens: string[][] = [];
 	const approvalFrames: string[][] = [];
+	const approvalDockFrames: string[][] = [];
 	const statuses: { color: string; text: string }[] = [];
 	const boldLabels: string[] = [];
 	let command!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
@@ -154,9 +157,13 @@ function fixture(
 					getKeys: (name: string) => bindings[name] ?? defaults[name] ?? [],
 					matches: (data: string, name: string) => (bindings[name] ?? defaults[name] ?? []).some(key => raw[key] === data),
 				};
-				const component = factory(tui, { fg: (color: string, text: string) => options.inspectApproval ? `\x1b[${{ accent: 31, text: 32, muted: 33, dim: 34, warning: 35 }[color] ?? 39}m${text}\x1b[0m` : text }, options.realBindings ? getKeybindings() : keybindings, resolve,
+				const component = factory(tui, {
+					fg: (color: string, text: string) => options.inspectApproval ? `\x1b[${{ accent: 31, text: 32, muted: 33, dim: 34, warning: 35, toolTitle: 36 }[color] ?? 39}m${text}\x1b[0m` : text,
+					bold: (text: string) => text,
+				}, options.realBindings ? getKeybindings() : keybindings, resolve,
 				) as { render: (width: number) => string[]; invalidate: () => void; focused?: boolean; handleInput?: (key: string) => void; handleMouse?: (event: TuiMouseEvent) => TuiMouseEventResult | undefined };
 				if (component.handleInput) {
+					let dockRoot: ReturnType<typeof createChatViewport>["root"] | undefined;
 					// The real Pi host mounts custom() in its editor container before dispatching input.
 					if (options.tui && options.dockFooterRows !== undefined) {
 						const document = new Container();
@@ -171,8 +178,11 @@ function fixture(
 						// Match InteractiveMode.mountInteractiveTui and its fullscreen root.
 						for (const child of [document, pendingMessages, status, widgetsAbove, editor, widgetsBelow, footer])
 							options.tui.addChild(child);
-						if (options.tui instanceof TuiAltScreen) options.tui.setLayoutRoot(createChatViewport({ document, editor, footer,
-							pendingMessages, status, widgetsAbove, widgetsBelow }).root);
+						if (options.tui instanceof TuiAltScreen) {
+							dockRoot = createChatViewport({ document, editor, footer,
+								pendingMessages, status, widgetsAbove, widgetsBelow }).root;
+							options.tui.setLayoutRoot(dockRoot);
+						}
 					} else if (options.tui) options.tui.addChild(component);
 					else tui.children.push(component as any);
 					events.push("confirm");
@@ -181,6 +191,11 @@ function fixture(
 						Object.assign(tui.terminal, size);
 						options.tui?.renderNow();
 						approvalFrames.push(component.render(size.columns));
+						if (dockRoot) {
+							approvalDockFrames.push(renderLayoutFrame(dockRoot, size.columns, size.rows, () => {}).lines.map(stripVTControlCharacters));
+						} else if (options.tui instanceof TuiMainScreen) {
+							approvalDockFrames.push(options.tui.captureRenderState().previousLines.slice(-size.rows).map(stripVTControlCharacters));
+						}
 					}
 					const warning = approvalFrames.at(-1)!.join("\n");
 					warnings.push(warning);
@@ -217,6 +232,7 @@ function fixture(
 		warnings,
 		approvalScreens,
 		approvalFrames,
+		approvalDockFrames,
 		statuses,
 		boldLabels,
 		startup: () => startup({ type: "session_start" }, ctx),
@@ -409,8 +425,10 @@ test("approval uses the public ask-user questionnaire layout with full disclosur
 	const lines = f.approvalFrames[0];
 	expect(lines[0]).toMatch(/^\x1b\[31m─/);
 	expect(lines.at(-1)).toMatch(/^\x1b\[31m─/);
-	expect(lines[1]).toContain("Allow sudo_exec to run as administrator for up to 1 minute?");
-	expect(lines[2]).toContain("Authenticate in this terminal");
+	expect(lines[1]).toContain("\x1b[36mQuestionnaire\x1b[0m • \x1b[31mSelect one\x1b[0m");
+	expect(lines[1]).toContain("1/1");
+	expect(lines[2]).toContain("Allow sudo_exec to run as administrator for up to 1 minute?");
+	expect(lines[3]).toContain("Authenticate in this terminal");
 	for (const warning of ["The model can run any sudo-policy command", "Untrusted text may influence",
 		"Lock cannot undo changes", "This terminal's sudo cache may be shared"]) {
 		expect(lines.join("\n")).toContain(warning);
@@ -423,6 +441,74 @@ test("approval uses the public ask-user questionnaire layout with full disclosur
 	const helper = fixture({ inspectApproval: true, askpass: () => "/trusted/helper", approvalKeys: ["1"] });
 	await helper.command("unlock");
 	expect(helper.approvalFrames[0].join("\n")).toContain("Authenticate with OS askpass (/trusted/helper)");
+});
+
+test("released questionnaire header participates in the exact-height consent boundary", async () => {
+	const measured = fixture({ approvalKeys: ["1"] });
+	await measured.command("unlock 1");
+	const fullFrame = measured.approvalFrames[0];
+	expect(fullFrame[1]).toContain("Questionnaire • Select one • 1/1");
+	expect(fullFrame.join("\n")).toContain("2. YES");
+	// The added header must count as a real row, not fit in the previous release's budget.
+	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+		for (const spareRows of [4, 5]) {
+			for (const approvalMouse of [false, true]) {
+				const terminal = new RecordingTerminal();
+				terminal.rows = fullFrame.length + spareRows;
+				const tui = new Screen(terminal);
+				tui.start();
+				const f = fixture({ tui, dockFooterRows: 2, approvalMouse, focusApproval: true,
+					approvalKeys: approvalMouse ? ["\u001b"] : ["2", "\r", "\u001b"] });
+				try {
+					await f.command("unlock 1");
+					const dock = f.approvalDockFrames[0];
+					if (spareRows === 5) {
+						expect(f.approvalFrames[0]).toEqual(fullFrame);
+						for (const line of fullFrame) expect(dock).toContain(line);
+						expect(f.calls.slice(0, 3).map(call => call.args)).toEqual([
+							["-k"], ["-v"], ["-n", "--", "/usr/bin/true"],
+						]);
+					} else {
+						expect(dock.join("\n")).toContain("Resize / Esc to cancel");
+						expect(dock.join("\n")).not.toContain("2. YES");
+						expect(f.calls).toHaveLength(0);
+					}
+				} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
+			}
+		}
+	}
+});
+
+test("actual dock geometry preserves every new-component row before keyboard or mouse YES", async () => {
+	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+		for (const footerRows of [2, 24]) {
+			for (const approvalMouse of [false, true]) {
+				const terminal = new RecordingTerminal();
+				terminal.rows = 24;
+				const tui = new Screen(terminal);
+				tui.start();
+				const f = fixture({ tui, dockFooterRows: footerRows, approvalMouse, focusApproval: true,
+					approvalKeys: approvalMouse ? ["\u001b"] : ["2", "\r", "\u001b"] });
+				try {
+					await f.command("unlock 1");
+					const frame = f.approvalFrames[0];
+					const dock = f.approvalDockFrames[0];
+					expect(frame[1]).toContain("Questionnaire • Select one • 1/1");
+					expect(frame.join("\n")).toContain("1. NO (default)");
+					expect(frame.join("\n")).toContain("2. YES");
+					if (footerRows === 2) {
+						for (const line of frame) expect(dock).toContain(line);
+						expect(f.calls[1]?.args).toEqual(["-v"]);
+					} else {
+						// This is a clipped real Pi frame, not a fixture-supplied visibility flag.
+						expect(frame.filter(line => line.trim()).some(line => !dock.includes(line))).toBe(true);
+						expect(f.calls).toHaveLength(0);
+						expect(f.messages.some(message => message.includes("consent is clipped"))).toBe(true);
+					}
+				} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
+			}
+		}
+	}
 });
 
 test("resize followed by batched YES and Enter cannot approve before new consent renders", async () => {
