@@ -2,7 +2,7 @@
 
 ## 로컬 확인
 
-`package.json`은 `private: true`, `pi.extensions: ["./index.ts"]`, Bun 테스트, TypeScript `noEmit` 검사와 문서 다이어그램 동기화 명령을 정의합니다. Bun의 현재 최소 버전은 `engines.bun: ">=1.4.2"`로 선언하며, 앞으로도 기본적으로 최신 안정 버전을 사용합니다. Bun 버전을 고정하는 `packageManager` 항목은 두지 않습니다. Pi 개발 의존성 `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`는 모두 정확히 `1.3.0`입니다. 기존 lockfile을 유지하며 의존성을 준비할 때:
+`package.json`은 `private: true`, `pi.extensions: ["./index.ts"]`, Bun 테스트, TypeScript `noEmit` 검사와 문서 다이어그램 동기화 명령을 정의합니다. Bun의 현재 최소 버전은 `engines.bun: ">=1.4.2"`로 선언하며, 앞으로도 기본적으로 최신 안정 버전을 사용합니다. Bun 버전을 고정하는 `packageManager` 항목은 두지 않습니다. Pi 개발 의존성 `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`는 모두 정확히 `1.4.0`입니다. 기존 lockfile을 유지하며 의존성을 준비할 때:
 
 ```bash
 bun install --frozen-lockfile
@@ -11,11 +11,13 @@ bun test
 bun run docs:check
 ```
 
-별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 Enter의 NO 기본 선택·숫자 `1`/`2`의 즉시 거절/승인·공유 설문 컴포넌트의 설정된 키/마우스와 가시성 게이트·좁은 화면에서 승인 차단 UI·실제 TuiMainScreen/TuiAltScreen 렌더와 중지·재개와 스크롤백 보존·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 1~180분 기한·동시성·인증 단계별 진단·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. `test/backend.test.ts`는 주입된 파일시스템·runner만으로 기본 경로 우선/부재/위험 경로 거부·심볼릭 링크·백엔드 고정·신원 변경과 재잠금·두 백엔드의 askpass 실패/무대체를 검증합니다. 확장 로드나 `status`에서 실제 호스트 파일을 미리 검사하지 않으며 확장 테스트도 가짜 백엔드를 주입합니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. `test/render.test.ts`는 좁은 너비·리사이즈·유니코드·실행 전 접근 검사와 실제 출력 상태·의미 색상/기호·원래 오류 진단의 가시성·모델/화면 잘림 출처 및 비화면/내보내기에서 회전 표시 미생성을 확인합니다. `test/extension.test.ts`는 부작용 없는 도움말·확인/idle/인증 방식별 상태·캐시 불확실성 경고·알림 제어문자 이스케이프·재인증 기한 안내도 검증합니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
+별도 `lint`나 `ci` 스크립트는 현재 없습니다. `bun run check`는 `tsc --noEmit`, `bun test`는 `test/*.test.ts`의 모의 sudo·비특권 subprocess 테스트를 실행합니다. 결과는 터미널에 출력되며 이 패키지는 별도 report 파일을 생성하지 않습니다. `test/extension.test.ts`는 Pi 명령/도구 등록과 Enter의 NO 기본 선택·숫자 `1`/`2`의 즉시 거절/승인·공유 설문 컴포넌트의 설정된 키/마우스와 가시성 게이트·좁은 화면에서 승인 차단 UI·실제 TuiMainScreen/TuiAltScreen 렌더와 중지·재개와 스크롤백 보존·shutdown을, `test/sudo.test.ts`는 clock/runner 주입으로 1~180분 기한·동시성·인증 단계별 진단·실패·poison을, `test/process.test.ts`는 제한된 출력과 자식 종료/파이프 경계를 확인합니다. `test/docs.test.ts`는 임시 디렉터리에서 다이어그램 불일치 탐지·동기화·반복 실행·마커 오류 처리를 확인하며 실제 문서를 수정하지 않습니다. `test/backend.test.ts`는 주입된 파일시스템·runner만으로 기본 경로 우선/부재/위험 경로 거부·심볼릭 링크·백엔드 고정·신원 변경과 재잠금·두 백엔드의 askpass 실패/무대체를 검증합니다. 확장 로드나 `status`에서 실제 호스트 파일을 미리 검사하지 않으며 확장 테스트도 가짜 백엔드를 주입합니다. 가짜 파일 검사·runner로 askpass 경로·권한·경합·결과 제한도 검증합니다. `test/render.test.ts`는 좁은 너비·리사이즈·유니코드·실행 전 접근 검사와 실제 출력 상태·의미 색상/기호·원래 오류 진단의 가시성·모델/화면 잘림 출처 및 비화면/내보내기에서 회전 표시 미생성을 확인합니다. `test/extension.test.ts`는 부작용 없는 도움말·확인/idle/인증 방식별 상태·캐시 불확실성 경고·알림 제어문자 이스케이프·재인증 기한 안내도 검증합니다.
+
+Pi 1.4.0의 겹친 inline dialog는 설치된 `InteractiveMode`의 실제 dialog 메서드와 가짜 terminal·최소 host scaffold로 regular/fullscreen에서 확인합니다. 다른 창 아래 숨은 승인을 lock/shutdown으로 철회해도 현재 창은 유지되고, 오래된 입력은 새 시도를 승인하지 못하는지 검증합니다. 덮는 창을 실제로 렌더한 뒤 같은 크기 또는 바뀐 크기로 확인창을 복원하고, 포커스 복귀 뒤 새 프레임 전에는 YES를 거부하며 새 프레임 후에는 승인하는지 확인합니다. 숫자 `2`·설정된 확인 키·컴포넌트 마우스 YES를 검증합니다. 마우스는 두 모드 모두 컴포넌트에 직접 전달하는 합성 이벤트이며 실제 터미널 마우스 라우팅 검증은 아닙니다. 새 복원 회귀 테스트는 sleep 없이 microtask로 복귀와 렌더 사이를 분리합니다. 전체 호스트 세션이나 provider를 시작하지 않습니다. 실제 비밀번호 입력, GUI askpass, sudo 정책, Linux/macOS 양쪽 실제 인증을 자동으로 검증하지 않습니다.
 
 ## GitHub Actions CI
 
-[CI 워크플로](../.github/workflows/ci.yml)는 PR, `main` push, `v*` 태그 push 및 수동 실행을 지원합니다. Ubuntu에서 `setup-bun`의 `bun-version: latest`로 최신 안정 Bun을 선택합니다. 의존성 설치 전에 실제 `Bun.version`이 `steps.setup_bun.outputs.bun-version`과 일치하고 `Bun.semver`로 현재 최소 `1.4.2` 이상인지 확인합니다. frozen lockfile을 사용해 Pi 1.2에서 제거된 `chord` 없이 일곱 Pi runtime 패키지의 exact `1.3.0` graph, 타입 검사·전체 테스트·다이어그램 Markdown 동기화를 확인하고, 추적 파일 변경이 없는지 검사합니다. Actions는 커밋 SHA로 고정하며 토큰은 `contents: read`, 체크아웃 인증 정보는 유지하지 않습니다. 의존성 설치 스크립트도 실행하지 않습니다.
+[CI 워크플로](../.github/workflows/ci.yml)는 PR, `main` push, `v*` 태그 push 및 수동 실행을 지원합니다. Ubuntu에서 `setup-bun`의 `bun-version: latest`로 최신 안정 Bun을 선택합니다. 의존성 설치 전에 실제 `Bun.version`이 `steps.setup_bun.outputs.bun-version`과 일치하고 `Bun.semver`로 현재 최소 `1.4.2` 이상인지 확인합니다. frozen lockfile을 사용해 Pi 1.2에서 제거된 `chord` 없이 일곱 Pi runtime 패키지의 exact `1.4.0` graph, 타입 검사·전체 테스트·다이어그램 Markdown 동기화를 확인하고, 추적 파일 변경이 없는지 검사합니다. Actions는 커밋 SHA로 고정하며 토큰은 `contents: read`, 체크아웃 인증 정보는 유지하지 않습니다. 의존성 설치 스크립트도 실행하지 않습니다.
 
 실제 sudo 인증·GUI askpass·macOS 인증 및 Podman 이미지 재렌더링은 CI 범위가 아닙니다. 다이어그램 검사는 `.mmd`와 Markdown의 일치만 확인합니다. CI 성공을 실제 관리자 인증이나 이미지 최신성 검증으로 해석하지 마세요.
 

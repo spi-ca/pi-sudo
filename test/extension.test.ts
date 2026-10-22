@@ -5,6 +5,7 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	ExtensionToolContext,
+	ExtensionUIContext,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
@@ -12,8 +13,10 @@ import { runProcess, type Invocation, type Outcome, type Runner, type SudoBacken
 import { fakeClock } from "./clock.js";
 import type { CallClock } from "../src/render.js";
 import type { Clock } from "../src/sudo.js";
-import { Container, CURSOR_MARKER, TuiMainScreen, TuiAltScreen, getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
-import type { Terminal, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { Container, CURSOR_MARKER, KeybindingsManager, TUI_KEYBINDINGS, TuiMainScreen, TuiAltScreen, getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
+import type { Component, Terminal, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { InteractiveMode } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js";
+import { initTheme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { createChatViewport } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/chat-viewport.js";
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 
@@ -31,6 +34,7 @@ function fixture(
 		mode?: string;
 		tty?: boolean;
 		confirm?: () => Promise<boolean>;
+		customUI?: ExtensionUIContext["custom"];
 		approvalKeys?: string[];
 		approvalMouse?: boolean;
 		invalidateApprovalBeforeInput?: boolean;
@@ -186,6 +190,7 @@ function fixture(
 					} else if (options.tui) options.tui.addChild(component);
 					else tui.children.push(component as any);
 					events.push("confirm");
+					if (options.focusApproval) component.focused = true;
 					const sizes = [{ columns: tui.terminal.columns, rows: tui.terminal.rows }, ...options.resizeApproval ?? []];
 					for (const size of sizes) {
 						Object.assign(tui.terminal, size);
@@ -202,7 +207,6 @@ function fixture(
 					approvalScreens.push(component.render(20));
 					component.render(tui.terminal.columns);
 					if (options.resizeBeforeInput) Object.assign(tui.terminal, options.resizeBeforeInput);
-					if (options.focusApproval) component.focused = true;
 					if (options.invalidateApprovalBeforeInput) component.invalidate();
 					void (async () => {
 						if (options.approvalMouse) {
@@ -224,6 +228,7 @@ function fixture(
 			},
 		},
 	} as unknown as ExtensionCommandContext & ExtensionToolContext;
+	if (options.customUI) ctx.ui.custom = options.customUI;
 	return {
 		calls,
 		events,
@@ -273,6 +278,177 @@ class RecordingTerminal implements Terminal {
 	setTitle(_title: string) {}
 	setProgress(_active: boolean) {}
 	setProgramStatus(_status: Parameters<Terminal["setProgramStatus"]>[0]) {}
+}
+
+// Exercise the installed host's dialog methods on a minimal scaffold with a fake
+// terminal/editor, without constructing a session or loading user/provider state.
+function inlineDialogHost(tui: TUI, keybindings = getKeybindings()) {
+	initTheme("dark", false); // Built-in theme only; no user themes or watcher.
+	let editorText = "draft";
+	const editor = {
+		render: () => [editorText], invalidate() {},
+		getText: () => editorText, setText: (value: string) => { editorText = value; },
+	};
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
+	const document = new Container(), pendingMessages = new Container(), status = new Container();
+	const widgetsAbove = new Container(), widgetsBelow = new Container(), footer = new Container();
+	document.addChild({ render: () => ["transcript"], invalidate() {} });
+	footer.addChild({ render: () => ["footer"], invalidate() {} });
+	for (const child of [document, pendingMessages, status, widgetsAbove, editorContainer, widgetsBelow, footer])
+		tui.addChild(child);
+	if (tui instanceof TuiAltScreen) tui.setLayoutRoot(createChatViewport({
+		document, pendingMessages, status, widgetsAbove, editor: editorContainer, widgetsBelow, footer,
+	}).root);
+	const host = Object.assign(Object.create(InteractiveMode.prototype), {
+		ui: tui, editor, editorContainer, keybindings,
+		extensionDialogs: [], programStatus: { setBlocked() {} },
+	}) as { showExtensionCustom: ExtensionUIContext["custom"] };
+	return { custom: host.showExtensionCustom.bind(host), editor, editorContainer };
+}
+
+test("host inline stack removes revoked hidden consent without closing the newer dialog", async () => {
+	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+		for (const transition of ["lock", "shutdown"] as const) {
+			const terminal = new RecordingTerminal();
+			terminal.rows = 24;
+			const tui = new Screen(terminal);
+			const host = inlineDialogHost(tui);
+			const f = fixture({ tui, customUI: host.custom, askpass: () => "/trusted/helper" });
+			tui.start();
+			try {
+				const attempt = f.command("unlock");
+				await Promise.resolve();
+				tui.renderNow();
+				const consent = tui.getFocusedComponent()!;
+				expect(consent.render(80).join("\n")).toContain("2. YES");
+				let closeOther!: (value: string) => void;
+				let disposed = 0;
+				const other: Component & { dispose(): void } = {
+					render: () => ["unrelated dialog"], invalidate() {}, dispose() { disposed++; },
+				};
+				const otherResult = host.custom<string>((_tui, _theme, _keys, done) => {
+					closeOther = done;
+					return other;
+				});
+				await Promise.resolve();
+				tui.renderNow();
+				expect(tui.getFocusedComponent()).toBe(other);
+				// A stale event cannot authorize a component no longer in the dock.
+				consent.handleInput?.("2");
+				expect(f.calls).toHaveLength(0);
+				await (transition === "lock" ? f.command("lock") : f.shutdown());
+				await attempt; // hidden custom() must settle without its own input
+				expect(tui.getFocusedComponent()).toBe(other);
+				expect(host.editorContainer.children).toEqual([other]);
+				expect(disposed).toBe(0);
+				expect(f.calls.some(call => call.args.includes("-v"))).toBe(false);
+				await expect(f.exec()).rejects.toThrow("locked");
+				consent.handleInput?.("2");
+				closeOther("other result");
+				expect(await otherResult).toBe("other result");
+				expect(disposed).toBe(1);
+				expect(host.editorContainer.children).toEqual([host.editor]);
+				expect(host.editor.getText()).toBe("draft");
+				if (transition === "lock") {
+					const next = f.command("unlock");
+					await Promise.resolve();
+					tui.renderNow();
+					const current = tui.getFocusedComponent()!;
+					expect(current).not.toBe(consent);
+					consent.handleInput?.("2");
+					expect(tui.getFocusedComponent()).toBe(current);
+					current.handleInput?.("1");
+					await next;
+					expect(f.calls.some(call => call.args.includes("-v"))).toBe(false);
+				}
+			} finally { await f.shutdown(); tui.stop({ preserveScreen: true }); }
+		}
+	}
+});
+
+// Resize is an independent guard: same-size restoration must not reuse a frame
+// painted before another dialog covered it. Exercise each submission path without
+// multiplying every input by every geometry (mouse is component-level synthetic input).
+for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+	for (const scenario of ["same-size numeric YES", "resized numeric YES", "same-size configured confirm", "same-size mouse YES"] as const) {
+		test(`host restored consent needs a fresh frame: ${Screen.name}, ${scenario}`, async () => {
+			const terminal = new RecordingTerminal();
+			terminal.rows = 24;
+			const tui = new Screen(terminal);
+			const bindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.confirm": ["ctrl+y"] });
+			const host = inlineDialogHost(tui, bindings);
+			const f = fixture({ tui, customUI: host.custom, askpass: () => "/trusted/helper" });
+			tui.start();
+			const attempt = f.command("unlock");
+			try {
+				await Promise.resolve();
+				const consent = tui.getFocusedComponent()!;
+				const render = consent.render.bind(consent);
+				const frames: string[][] = [];
+				consent.render = width => {
+					const lines = render(width);
+					frames.push(lines);
+					return lines;
+				};
+				if (scenario === "same-size configured confirm") consent.handleInput?.("\u001b[B");
+				tui.renderNow();
+				const initialFrame = frames.at(-1)!;
+				const yesRow = initialFrame.findIndex(line => line.includes("2. YES"));
+				expect(yesRow).toBeGreaterThan(0);
+				expect(stripVTControlCharacters(terminal.writes.join(""))).toContain("2. YES");
+				const initialRenderCount = frames.length;
+
+				let closeOther!: () => void;
+				const otherResult = host.custom<void>((_tui, _theme, _keys, done) => {
+					closeOther = () => done();
+					return { render: () => ["UNRELATED-COVER-DIALOG"], invalidate() {} };
+				});
+				await Promise.resolve();
+				terminal.writes = [];
+				tui.renderNow(); // The cover must actually replace the visible consent.
+				const coverPaint = stripVTControlCharacters(terminal.writes.join(""));
+				expect(coverPaint).toContain("UNRELATED-COVER-DIALOG");
+				expect(coverPaint).not.toContain("2. YES");
+				expect(frames).toHaveLength(initialRenderCount);
+				if (scenario === "resized numeric YES") terminal.rows = 30;
+				closeOther();
+				await otherResult; // Microtasks restore focus, but do not paint the queued frame.
+				expect(tui.getFocusedComponent()).toBe(consent);
+				expect(host.editorContainer.children).toEqual([consent]);
+				expect(frames).toHaveLength(initialRenderCount);
+				terminal.writes = [];
+
+				const submitYes = () => {
+					if (scenario === "same-size mouse YES") {
+						for (const type of ["press", "click"] as const) consent.handleMouse?.({
+							type, button: "left", x: 6, y: yesRow, screenX: 6, screenY: yesRow,
+							width: terminal.columns, height: terminal.rows, shift: false, alt: false, ctrl: false,
+						});
+					} else consent.handleInput?.(scenario === "same-size configured confirm" ? "\u0019" : "2");
+				};
+				submitYes();
+				// Allow an erroneously accepted YES to reach the fake runner, not a timer/render.
+				for (let tick = 0; tick < 8; tick++) await Promise.resolve();
+				expect(terminal.writes).toHaveLength(0);
+				expect(frames).toHaveLength(initialRenderCount);
+				expect(f.calls).toHaveLength(0);
+				expect(tui.getFocusedComponent()).toBe(consent);
+				expect(f.messages.at(-1)).toContain("consent is clipped");
+
+				tui.renderNow(); // Only a real wrapper render may restore the visibility token.
+				expect(frames.length).toBeGreaterThan(initialRenderCount);
+				expect(stripVTControlCharacters(terminal.writes.join(""))).toContain("2. YES");
+				submitYes();
+				await attempt;
+				expect(f.calls.slice(0, 3).map(call => call.args)).toEqual([
+					["-k"], ["-A", "-v"], ["-n", "--", "/usr/bin/true"],
+				]);
+				expect(f.messages.at(-1)).toContain("sudo_exec · Ready");
+				expect(host.editorContainer.children).toEqual([host.editor]);
+			} finally { await f.shutdown(); await attempt; tui.stop({ preserveScreen: true }); }
+		});
+	}
 }
 
 test("authentication resumes rendering after a request queued while TUI was stopped", async () => {

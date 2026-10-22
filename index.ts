@@ -78,7 +78,12 @@ async function approveUnlock(ui: ExtensionUIContext, minutes: number, mode: stri
 			component = createQuestionnaireComponent({ questions, tui, theme, keybindings, done, canSubmit });
 			const wrapper = {
 				get focused() { return component.focused; },
-				set focused(value: boolean) { component.focused = value; },
+				set focused(value: boolean) {
+					// Host dialog restoration returns focus before repainting the dock.
+					// A frame from before focus changed is no longer proof of visibility.
+					shown = undefined;
+					component.focused = value;
+				},
 				render(width: number) {
 					const lines = fullFrame(width);
 					shown = fits(width, lines.length)

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Pi 개발 의존성·lockfile·현재 CI의 일곱 패키지 graph를 exact `1.4.0`으로 갱신합니다. peer·immutable `pi-ask-user#v20261019-1` Git ref와 승인·인증·허가 철회·재인증 기한·백엔드 고정 정책은 유지합니다.
+- Pi 1.4.0의 inline dialog가 확인창을 가린 뒤 같은 크기로 복원해도, 포커스 전환 시 이전 가시성 기록을 폐기하고 복귀 후 새 프레임을 그리기 전에는 YES를 거부합니다. 실제 host dialog 메서드·regular/fullscreen 렌더로 복원·리사이즈·숫자/설정된 확인 키/마우스 승인과 가려진 확인창의 잠금/종료 시 철회·다른 창 유지·늦은 입력 차단을 검증합니다. 실제 sudo 인증·askpass·provider 호출은 수행하지 않습니다.
+
 ## v20261016-1
 
 - Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.3.0`으로 갱신합니다. peer·immutable `pi-ask-user` Git ref·승인·인증·허가 철회·백엔드 고정 정책은 유지합니다.
