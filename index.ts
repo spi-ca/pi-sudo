@@ -1,5 +1,5 @@
 /** Pi adapter: user consent and terminal ownership live here; grant policy lives in SudoAccess. */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Container, truncateToWidth } from "@earendil-works/pi-tui";
 import { createQuestionnaireComponent, normalizeQuestions, type QuestionnaireResult } from "pi-ask-user/ui";
 import type { TUI, TuiMainScreenRenderState } from "@earendil-works/pi-tui";
@@ -96,7 +96,7 @@ async function approveUnlock(ui: ExtensionUIContext, minutes: number, mode: stri
 				handleMouse(event: Parameters<typeof component.handleMouse>[0]) { return component.handleMouse(event); },
 			};
 			return wrapper;
-		});
+		}, { blocked: { kind: "permission", message: "Approve sudo access" } });
 		return !signal?.aborted && !result.cancelled && result.answers.some(answer =>
 			answer.id === "sudo" && answer.kind === "single" && answer.value === "yes");
 	} finally {

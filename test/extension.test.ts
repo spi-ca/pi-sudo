@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { stripVTControlCharacters } from "node:util";
 import type {
 	ExtensionAPI,
@@ -67,6 +68,7 @@ function fixture(
 	const messages: string[] = [];
 	const notices: { message: string; type: string }[] = [];
 	const warnings: string[] = [];
+	const customOptions: Parameters<ExtensionUIContext["custom"]>[1][] = [];
 	const approvalScreens: string[][] = [];
 	const approvalFrames: string[][] = [];
 	const approvalDockFrames: string[][] = [];
@@ -129,7 +131,8 @@ function fixture(
 			setStatus: (_key: string, text: string | undefined) => {
 				statuses.push(text === undefined ? { color: "clear", text: "" } : JSON.parse(text));
 			},
-			custom: async (factory: (...args: any[]) => unknown) => {
+			custom: async (factory: (...args: any[]) => unknown, customOpts: Parameters<ExtensionUIContext["custom"]>[1]) => {
+				customOptions.push(customOpts);
 				let resolve!: (value: unknown) => void;
 				const result = new Promise<unknown>((done) => { resolve = done; });
 				const tui = options.tui ?? {
@@ -236,6 +239,8 @@ function fixture(
 		notices,
 		warnings,
 		approvalScreens,
+		customOptions,
+		validateArgs: (args: unknown) => validateToolArguments(tool, { type: "toolCall", id: "validation", name: tool.name, arguments: args as Parameters<typeof validateToolArguments>[1]["arguments"] }),
 		approvalFrames,
 		approvalDockFrames,
 		statuses,
@@ -300,11 +305,15 @@ function inlineDialogHost(tui: TUI, keybindings = getKeybindings()) {
 	if (tui instanceof TuiAltScreen) tui.setLayoutRoot(createChatViewport({
 		document, pendingMessages, status, widgetsAbove, editor: editorContainer, widgetsBelow, footer,
 	}).root);
+	type Blocked = NonNullable<Parameters<ExtensionUIContext["custom"]>[1]>["blocked"];
+	const blocked: { source: string; value: Blocked }[] = [];
 	const host = Object.assign(Object.create(InteractiveMode.prototype), {
 		ui: tui, editor, editorContainer, keybindings,
-		extensionDialogs: [], programStatus: { setBlocked() {} },
+		extensionDialogs: [], programStatus: {
+			setBlocked(source: string, value: Blocked) { blocked.push({ source, value }); },
+		},
 	}) as { showExtensionCustom: ExtensionUIContext["custom"] };
-	return { custom: host.showExtensionCustom.bind(host), editor, editorContainer };
+	return { custom: host.showExtensionCustom.bind(host), editor, editorContainer, blocked };
 }
 
 test("host inline stack removes revoked hidden consent without closing the newer dialog", async () => {
@@ -322,6 +331,7 @@ test("host inline stack removes revoked hidden consent without closing the newer
 				tui.renderNow();
 				const consent = tui.getFocusedComponent()!;
 				expect(consent.render(80).join("\n")).toContain("2. YES");
+				expect(host.blocked.at(-1)).toEqual({ source: "extension-dialog", value: { kind: "permission", message: "Approve sudo access" } });
 				let closeOther!: (value: string) => void;
 				let disposed = 0;
 				const other: Component & { dispose(): void } = {
@@ -330,15 +340,18 @@ test("host inline stack removes revoked hidden consent without closing the newer
 				const otherResult = host.custom<string>((_tui, _theme, _keys, done) => {
 					closeOther = done;
 					return other;
-				});
+				}, { blocked: { kind: "question", message: "Other question" } });
 				await Promise.resolve();
 				tui.renderNow();
 				expect(tui.getFocusedComponent()).toBe(other);
+				expect(host.blocked.at(-1)?.value).toEqual({ kind: "question", message: "Other question" });
+				const blockedCount = host.blocked.length;
 				// A stale event cannot authorize a component no longer in the dock.
 				consent.handleInput?.("2");
 				expect(f.calls).toHaveLength(0);
 				await (transition === "lock" ? f.command("lock") : f.shutdown());
 				await attempt; // hidden custom() must settle without its own input
+				expect(host.blocked).toHaveLength(blockedCount);
 				expect(tui.getFocusedComponent()).toBe(other);
 				expect(host.editorContainer.children).toEqual([other]);
 				expect(disposed).toBe(0);
@@ -398,6 +411,7 @@ for (const Screen of [TuiMainScreen, TuiAltScreen]) {
 				expect(yesRow).toBeGreaterThan(0);
 				expect(stripVTControlCharacters(terminal.writes.join(""))).toContain("2. YES");
 				const initialRenderCount = frames.length;
+				expect(host.blocked.at(-1)?.value).toEqual({ kind: "permission", message: "Approve sudo access" });
 
 				let closeOther!: () => void;
 				const otherResult = host.custom<void>((_tui, _theme, _keys, done) => {
@@ -410,10 +424,12 @@ for (const Screen of [TuiMainScreen, TuiAltScreen]) {
 				const coverPaint = stripVTControlCharacters(terminal.writes.join(""));
 				expect(coverPaint).toContain("UNRELATED-COVER-DIALOG");
 				expect(coverPaint).not.toContain("2. YES");
+				expect(host.blocked.at(-1)?.value).toBeUndefined();
 				expect(frames).toHaveLength(initialRenderCount);
 				if (scenario === "resized numeric YES") terminal.rows = 30;
 				closeOther();
 				await otherResult; // Microtasks restore focus, but do not paint the queued frame.
+				expect(host.blocked.at(-1)?.value).toEqual({ kind: "permission", message: "Approve sudo access" });
 				expect(tui.getFocusedComponent()).toBe(consent);
 				expect(host.editorContainer.children).toEqual([consent]);
 				expect(frames).toHaveLength(initialRenderCount);
@@ -446,6 +462,7 @@ for (const Screen of [TuiMainScreen, TuiAltScreen]) {
 				]);
 				expect(f.messages.at(-1)).toContain("sudo_exec · Ready");
 				expect(host.editorContainer.children).toEqual([host.editor]);
+				expect(host.blocked.at(-1)?.value).toBeUndefined();
 			} finally { await f.shutdown(); await attempt; tui.stop({ preserveScreen: true }); }
 		});
 	}
@@ -1862,4 +1879,32 @@ test("declined reauth reports locked access; successful reauth names unchanged d
 	expect(f.messages.at(-1)).toBe("sudo · Reauthentication declined; access remains locked");
 	await expect(f.exec()).rejects.toThrow("locked");
 	await f.shutdown();
+});
+
+test("Pi 1.5 validates the registered TypeBox arguments without executing sudo", () => {
+	const f = fixture();
+	const args = { executable: "/usr/bin/id", args: ["-u"], cwd: "/tmp" };
+	expect(f.validateArgs(args)).toEqual(args);
+	expect(f.validateArgs(args)).not.toBe(args);
+	// Host coercion is JSON Schema behavior, not an authorization grant.
+	expect(f.validateArgs({ executable: "/usr/bin/id", args: "-u", cwd: null }))
+		.toEqual({ executable: "/usr/bin/id", args: ["-u"] });
+	expect(() => f.validateArgs({ executable: "/usr/bin/id" })).toThrow("args: missing");
+	expect(() => f.validateArgs({ args: [] })).toThrow("executable: missing");
+	expect(() => f.validateArgs({ executable: {}, args: [] })).toThrow("executable: expected string");
+	expect(() => f.validateArgs({ executable: "/usr/bin/id", args: [{}] })).toThrow("args.0: expected string");
+	expect(f.calls).toHaveLength(0);
+});
+
+test("only consent advertises permission blocking; terminal auth placeholder stays unmarked", async () => {
+	for (const askpass of [undefined, "/trusted/private-helper-canary"]) {
+		const f = fixture({ askpass: () => askpass, resolveAskpass: value => value ?? "/trusted/helper" });
+		try {
+			await f.command("unlock 2");
+			expect(f.customOptions[0]).toEqual({ blocked: { kind: "permission", message: "Approve sudo access" } });
+			expect(JSON.stringify(f.customOptions)).not.toContain("private-helper-canary");
+			expect(f.customOptions).toHaveLength(askpass ? 1 : 2);
+			if (!askpass) expect(f.customOptions[1]).toBeUndefined();
+		} finally { await f.shutdown(); }
+	}
 });
