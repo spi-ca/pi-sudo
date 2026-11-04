@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { keyText, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
@@ -92,7 +93,22 @@ function argument(value: string): string {
 		: safeText(JSON.stringify(value));
 }
 
-function expandHint(): string {
+function expandHint(context: ToolRenderContext): string {
+	// Only old hosts may consult this package's keybinding singleton. An injected
+	// empty helper means unbound, not permission to advertise a default shortcut.
+	if (typeof context.keyText === "function" || typeof context.keyHint === "function") {
+		try {
+			const key = context.keyText?.("app.tools.expand").trim();
+			if (key !== undefined && !key) return "";
+			const hint = typeof context.keyHint === "function"
+				? stripVTControlCharacters(context.keyHint("app.tools.expand", "to expand")).trim()
+				: `${key} to expand`;
+			if (!hint || /[\u0000-\u001f\u007f-\u009f]/.test(hint)) return "";
+			return hint;
+		} catch {
+			return "";
+		}
+	}
 	try {
 		const key = keyText("app.tools.expand");
 		if (key && !/[\u0000-\u001f\u007f-\u009f]/.test(key))
@@ -113,6 +129,7 @@ function display(
 	previewRows = PREVIEW_ROWS,
 	styleHint: (text: string) => string = (text) => text,
 	preview: "head" | "tail" = "head",
+	expansionHint = "",
 ): { render: (width: number) => string[]; invalidate: () => void } {
 	return {
 		render(width) {
@@ -156,7 +173,8 @@ function display(
 			}
 			if (!expanded && body.length > visibleLines) {
 				const hidden = body.length - visibleLines;
-				const hint = wrap(styleHint(`... (${hidden} more ${hidden === 1 ? "line" : "lines"} • ${expandHint()})`));
+				const suffix = expansionHint ? ` • ${expansionHint}` : "";
+				const hint = wrap(styleHint(`... (${hidden} more ${hidden === 1 ? "line" : "lines"}${suffix})`));
 				if (preview === "tail") rows.push(...hint);
 				else previewBody.push(...hint);
 			}
@@ -189,7 +207,7 @@ export function renderCall(
 	const cwd = override ? args.cwd! : context.cwd;
 	const location = (override && cwd !== context.cwd) || context.expanded
 		? display([], [theme.fg("muted", `cwd: ${argument(cwd)}`)], [], context.expanded, 4,
-			(hint) => theme.fg("muted", hint))
+			(hint) => theme.fg("muted", hint), "head", expandHint(context))
 		: undefined;
 	const note = context.expanded
 		? display([theme.fg("muted", "argv display only · not a shell command; do not copy as a shell command")], [], [], true)
@@ -202,7 +220,7 @@ export function renderCall(
 			const elapsed = state?.timer ? theme.fg("muted", ` · ${elapsedTime(clock.now() - state.startedAt)}`) : "";
 			const line = prefix + title + " " + command + elapsed;
 			return [
-				...display([], [line], [], context.expanded, 4, (hint) => theme.fg("muted", hint)).render(width),
+				...display([], [line], [], context.expanded, 4, (hint) => theme.fg("muted", hint), "head", expandHint(context)).render(width),
 				...(location?.render(width) ?? []),
 				...(note?.render(width) ?? []),
 			];
@@ -282,7 +300,7 @@ export function renderResult(
 		const status = details?.streaming === true ? "⏳ Running…" : "⏳ Checking access…";
 		return display([theme.fg("warning", status), ...(text ? [""] : [])],
 			text ? outputLines(text).map((line) => theme.fg("toolOutput", line)) : [],
-			footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
+			footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail", expandHint(context));
 	}
 	const details = result.details && typeof result.details === "object" ? result.details as ResultDetails : undefined;
 	const text = result.content.filter((item) => item.type === "text" && typeof item.text === "string")
@@ -321,5 +339,5 @@ export function renderResult(
 		header.push(theme.fg("error", lines.shift() ?? ""));
 		body = lines.join("\n");
 	}
-	return display(body ? [...header, ""] : header, body ? outputLines(body).map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail");
+	return display(body ? [...header, ""] : header, body ? outputLines(body).map((line) => theme.fg("toolOutput", line)) : [], footers, options.expanded, PREVIEW_ROWS, (hint) => theme.fg("muted", hint), "tail", expandHint(context));
 }

@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## [0.1.1]
 
-- Pi 개발 의존성·lockfile·현재 CI의 일곱 패키지 graph를 exact `1.4.0`으로 갱신합니다. peer·immutable `pi-ask-user#v20261019-1` Git ref와 승인·인증·허가 철회·재인증 기한·백엔드 고정 정책은 유지합니다.
-- Pi 1.4.0의 inline dialog가 확인창을 가린 뒤 같은 크기로 복원해도, 포커스 전환 시 이전 가시성 기록을 폐기하고 복귀 후 새 프레임을 그리기 전에는 YES를 거부합니다. 실제 host dialog 메서드·regular/fullscreen 렌더로 복원·리사이즈·숫자/설정된 확인 키/마우스 승인과 가려진 확인창의 잠금/종료 시 철회·다른 창 유지·늦은 입력 차단을 검증합니다. 실제 sudo 인증·askpass·provider 호출은 수행하지 않습니다.
+- Pi 개발 의존성·lockfile·현재 CI graph를 `pi-schema`를 포함한 여덟 패키지 모두 exact `1.5.0`으로 갱신합니다. 기존 wildcard peer·immutable `pi-ask-user#v20261019-1` Git ref와 승인·인증·허가 철회·재인증 기한·백엔드 고정 정책은 유지합니다. 도구 인수 스키마의 `Type`은 host 제공 `typebox`에서 가져오고 wildcard peer와 exact 개발 의존성을 선언합니다.
+- 긴 argv·cwd·진행 중/최종 출력의 펼치기 안내는 Pi가 render context로 주입한 `keyText`/`keyHint`를 사용합니다. 주입된 helper가 빈 값(미지정 키)을 반환하면 `Ctrl+O`를 대신 표시하지 않으며, helper가 없는 구형 host의 기존 fallback은 유지합니다.
+- 사용자 동의 inline 화면에만 `permission` blocked 상태와 고정된 비민감 안내를 추가합니다. 다른 창에 가리거나 복원할 때 상태를 현재 창에 맞추며, 터미널 인증용 빈 컴포넌트에는 blocked 상태를 추가하지 않습니다. 승인·가시성·재인증 기한·TTY 정책은 바꾸지 않습니다.
+- Pi 1.5.0의 inline dialog가 확인창을 가린 뒤 같은 크기로 복원해도, 포커스 전환 시 이전 가시성 기록을 폐기하고 복귀 후 새 프레임을 그리기 전에는 YES를 거부합니다. 실제 host dialog 메서드·regular/fullscreen 렌더로 복원·리사이즈·숫자/설정된 확인 키/마우스 승인과 가려진 확인창의 잠금/종료 시 철회·다른 창 유지·늦은 입력 차단을 검증합니다. 실제 sudo 인증·askpass·provider 호출은 수행하지 않습니다.
 
 ## v20261016-1
 

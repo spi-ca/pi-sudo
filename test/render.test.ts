@@ -366,3 +366,57 @@ test("result symbols complement semantic colors, while pre-admission cannot clai
 	expect(pending).toBe("⏳ Checking access…");
 	expect(pending).not.toContain("Running");
 });
+
+test("injected host hints win over package keybindings in argv, cwd, partial and final output", () => {
+	const requested: string[] = [];
+	const hostContext = {
+		...context,
+		keyText: (id: string) => { requested.push(id); return "alt+x"; },
+		keyHint: (id: string, description: string) => {
+			requested.push(id);
+			return `\x1b[2mHOST-ALT-X ${description}\x1b[0m`;
+		},
+	} as ToolRenderContext;
+	const args = { executable: "/bin/echo", args: ["x".repeat(900)], cwd: "/override/" + "z".repeat(900) };
+	const call = renderCall(args, theme, hostContext).render(120).join("\n");
+	expect(call.match(/HOST-ALT-X to expand/g)).toHaveLength(2);
+	const text = Array(12).fill("output").join("\n");
+	for (const isPartial of [false, true]) {
+		styles.length = 0;
+		const rendered = renderResult(result(text, { streaming: true }), { expanded: false, isPartial }, theme, hostContext).render(120).join("\n");
+		expect(rendered).toContain("HOST-ALT-X to expand");
+		expect(rendered).not.toContain("Ctrl+O");
+		expect(rendered).not.toContain("\x1b");
+		expect(styles).toContainEqual({ color: "muted", text: "... (4 more lines • HOST-ALT-X to expand)" });
+	}
+	expect(requested.length).toBeGreaterThan(0);
+	expect(requested.every(id => id === "app.tools.expand")).toBe(true);
+});
+
+test("injected empty, unbound or failing helpers never advertise a fallback key", () => {
+	const text = Array(12).fill("output").join("\n");
+	for (const helpers of [
+		{ keyText: () => "", keyHint: () => " to expand" },
+		{ keyText: () => "alt+x", keyHint: () => "" },
+		{ keyText: () => "" },
+		{ keyHint: () => "" },
+		{ keyText: () => { throw new Error("unavailable"); } },
+	]) {
+		const hostContext = { ...context, ...helpers } as ToolRenderContext;
+		const components = [
+			renderCall({ executable: "/bin/echo", args: ["x".repeat(900)], cwd: "/override/" + "z".repeat(900) }, theme, hostContext),
+			...([false, true].map(isPartial => renderResult(result(text, { streaming: true }), { expanded: false, isPartial }, theme, hostContext))),
+		];
+		for (const component of components) {
+			const shown = component.render(120).join("\n");
+			expect(shown).toContain("more line");
+			expect(shown).not.toContain("to expand");
+			expect(shown).not.toContain("Ctrl+O");
+			expect(shown).not.toContain(" • ");
+		}
+	}
+	const keyTextOnly = { ...context, keyText: () => "alt+x" } as ToolRenderContext;
+	expect(renderResult(result(text), { expanded: false, isPartial: false }, theme, keyTextOnly).render(120).join("\n")).toContain("alt+x to expand");
+	const keyHintOnly = { ...context, keyHint: () => "HOST to expand" } as ToolRenderContext;
+	expect(renderResult(result(text), { expanded: false, isPartial: false }, theme, keyHintOnly).render(120).join("\n")).toContain("HOST to expand");
+});
