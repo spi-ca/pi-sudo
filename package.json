@@ -1,6 +1,6 @@
 {
 	"name": "pi-sudo",
-	"version": "2026.1104.2",
+	"version": "2026.1121.1",
 	"private": true,
 	"type": "module",
 	"engines": {
@@ -27,9 +27,9 @@
 		"typebox": "*"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-ai": "1.5.0",
-		"@earendil-works/pi-coding-agent": "1.5.0",
-		"@earendil-works/pi-tui": "1.5.0",
+		"@earendil-works/pi-ai": "1.5.1",
+		"@earendil-works/pi-coding-agent": "1.5.1",
+		"@earendil-works/pi-tui": "1.5.1",
 		"@types/bun": "1.3.14",
 		"@types/node": "24.2.0",
 		"typescript": "5.9.3",

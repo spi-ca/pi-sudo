@@ -398,7 +398,7 @@ for (const Screen of [TuiMainScreen, TuiAltScreen]) {
 				await Promise.resolve();
 				const consent = tui.getFocusedComponent()!;
 				const render = consent.render.bind(consent);
-				const frames: string[][] = [];
+				const frames: (readonly string[])[] = [];
 				consent.render = width => {
 					const lines = render(width);
 					frames.push(lines);
